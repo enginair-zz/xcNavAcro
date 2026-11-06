@@ -21,6 +21,7 @@ import 'package:xcnav/views/view_chat.dart';
 import 'package:xcnav/views/view_elevation.dart';
 import 'package:xcnav/views/view_map.dart';
 import 'package:xcnav/views/view_waypoints.dart';
+import 'package:xcnav/views/view_wind_table.dart';
 
 // widgets
 import 'package:xcnav/widgets/top_instruments.dart';
@@ -40,16 +41,29 @@ class _MyHomePageState extends State<MyHomePage> {
 
   PageController viewController = PageController(initialPage: 0);
   int viewPageIndex = 1;
-  final pageIndexNames = ["Menu", "Map", "Side", "Points", "Chat"];
+  final pageIndexNames = ["Menu", "Map", "Side", "Points", "Chat", "Wind"];
 
   @override
   void dispose() {
+    settingsMgr.acroMode.listenable.removeListener(onAcroMode);
     super.dispose();
+  }
+
+  /// The Wind page only exists in acro mode.
+  void onAcroMode() {
+    setState(() {
+      if (!settingsMgr.acroMode.value && pageIndexNames[viewPageIndex] == "Wind") {
+        viewPageIndex = 1;
+        viewController.jumpToPage(0);
+      }
+    });
   }
 
   @override
   void initState() {
     super.initState();
+
+    settingsMgr.acroMode.listenable.addListener(onAcroMode);
 
     myTelemetry.addListener(() {
       if (viewMapKey.currentState?.mapReady ?? false) {
@@ -178,7 +192,13 @@ class _MyHomePageState extends State<MyHomePage> {
                 child: PageView(
                   controller: viewController,
                   physics: const NeverScrollableScrollPhysics(),
-                  children: [ViewMap(key: viewMapKey), const ViewElevation(), const ViewWaypoints(), const ViewChat()],
+                  children: [
+                    ViewMap(key: viewMapKey),
+                    const ViewElevation(),
+                    const ViewWaypoints(),
+                    const ViewChat(),
+                    if (settingsMgr.acroMode.value) const ViewWindTable(),
+                  ],
                 ),
               ),
               BottomNavigationBar(
@@ -263,6 +283,13 @@ class _MyHomePageState extends State<MyHomePage> {
                       ],
                     ),
                   ),
+                  if (settingsMgr.acroMode.value)
+                    const BottomNavigationBarItem(
+                      label: "Wind",
+                      icon: Icon(
+                        Icons.air,
+                      ),
+                    ),
                 ],
               )
             ],

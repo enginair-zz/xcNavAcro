@@ -131,6 +131,7 @@
             "force_gps_altitude": "ใช้เฉพาะ GPS สำหรับความสูง",
             "gps_update_interval": "ช่วงเวลาอัปเดต GPS (ms)",
             "flight_detection": "การตรวจจับขึ้นบินและลงจอด",
+            "acro_mode": "โหมดผาดโผน",
             "group_view_includes_waypoints": "มุมมองกลุ่มรวมจุดนำทาง",
             "Distance": "ระยะทาง",
             "Speed": "ความเร็ว",

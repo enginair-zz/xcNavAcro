@@ -23,6 +23,7 @@ import 'package:xcnav/widgets/map_selector.dart';
 import 'package:xcnav/widgets/measurement_markers.dart';
 
 // map view parts
+import 'package:xcnav/views/map/acro_reserve_layer.dart';
 import 'package:xcnav/views/map/focus_mode.dart';
 import 'package:xcnav/views/map/glide_range_layer.dart';
 import 'package:xcnav/views/map/map_layers.dart';
@@ -571,6 +572,9 @@ class ViewMapState extends State<ViewMap> with AutomaticKeepAliveClientMixin<Vie
 
         // Where the pilot can glide to
         if (settingsMgr.glideRangeMode.value != GlideRangeMode.off) const GlideRangeLayer(),
+
+        // Where a reserve throw would land, around the "Acro" waypoint
+        if (settingsMgr.acroMode.value) const AcroReserveLayer(),
 
         // https://nowcoast.noaa.gov/help/#!section=map-service-list
         // if (localeZone == "NA" && settingsMgr.showWeatherOverlay.value)

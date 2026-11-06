@@ -131,6 +131,7 @@
             "force_gps_altitude": "Use GPS Only for Altitude",
             "gps_update_interval": "GPS Update Interval (ms)",
             "flight_detection": "Takeoff & Landing Detection",
+            "acro_mode": "Acro Mode",
             "group_view_includes_waypoints": "Group View Includes Waypoints",
             "Distance": "Distance",
             "Speed": "Speed",

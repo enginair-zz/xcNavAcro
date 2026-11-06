@@ -131,6 +131,7 @@
       "force_gps_altitude": "Использовать GPS только для определения высоты",
       "gps_update_interval": "Интервал обновления GPS (мс)",
       "flight_detection": "Определение взлёта и посадки",
+      "acro_mode": "Режим акро",
       "group_view_includes_waypoints": "Путевые точки на экране группы",
       "Distance": "Расстояние",
       "Speed": "Скорость",

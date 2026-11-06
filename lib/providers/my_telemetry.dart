@@ -35,6 +35,7 @@ import 'package:xcnav/providers/adsb.dart';
 import 'package:xcnav/providers/client.dart';
 import 'package:xcnav/providers/group.dart';
 import 'package:xcnav/providers/profile.dart';
+import 'package:xcnav/services/acro_service.dart';
 import 'package:xcnav/services/ble_service.dart';
 import 'package:xcnav/settings_service.dart';
 import 'package:xcnav/providers/wind.dart';
@@ -567,6 +568,11 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
         if (inFlight && geo!.spd > 1) {
           Provider.of<Wind>(context, listen: false)
               .handleVector(Vector(geo!.hdg, geo!.spd, timestamp: position.timestamp));
+        }
+
+        if (settingsMgr.acroMode.value) {
+          acroService.handleGeo(context, geo!, geoPrev,
+              vario: varioSmooth.value, gForce: gForceRecord, launchAlt: inFlight ? launchGeo?.alt : null);
         }
 
         // Update ADSB

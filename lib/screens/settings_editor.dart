@@ -7,6 +7,7 @@ import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:fuzzywuzzy/fuzzywuzzy.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart' as path_provider;
+import 'package:xcnav/dialogs/acro_mode_dialog.dart';
 import 'package:xcnav/dialogs/flight_detection_dialog.dart';
 import 'package:xcnav/locale.dart';
 
@@ -98,6 +99,10 @@ class _SettingsEditorState extends State<SettingsEditor> {
 
     settingsMgr.flightDetection.callback = () {
       showFlightDetectionDialog(context);
+    };
+
+    settingsMgr.acroMode.onTap = () {
+      showAcroModeDialog(context);
     };
 
     settingsMgr.adsbTestAudio.callback = () {
@@ -416,6 +421,7 @@ class _SettingsEditorState extends State<SettingsEditor> {
                                           }
                                           // Build each
                                           return ListTile(
+                                            onTap: e.config!.onTap,
                                             leading: e.config!.icon,
                                             title: Text("settings.title.${e.title}".tr()),
                                             subtitle:

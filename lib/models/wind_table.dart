@@ -1,0 +1,323 @@
+import 'dart:math';
+
+/// Wind at one altitude. Components are the direction the wind blows toward.
+typedef WindVector = ({double east, double north});
+
+/// Wind at an altitude (meters), or null when nothing is known.
+typedef WindAt = WindVector? Function(double alt);
+
+/// Height of each wind table band (meters). 100 ft.
+const double windBandHeight = 30.48;
+
+/// Wind table entries older than this are dropped.
+const Duration windTableMaxAge = Duration(hours: 3);
+
+class CircleFit {
+  final double cx;
+  final double cy;
+  final double r;
+
+  /// RMS distance of the points from the circle
+  final double rms;
+
+  const CircleFit(this.cx, this.cy, this.r, this.rms);
+}
+
+/// Algebraic circle fit (Taubin, solved with Newton's method). Null when the points don't define a circle.
+///
+/// Reference: Chernov, "Circular and Linear Regression", and https://people.cas.uab.edu/~mosya/cl/
+CircleFit? fitCircleTaubin(List<double> xs, List<double> ys) {
+  final n = xs.length;
+  if (n < 3 || ys.length != n) return null;
+  final xMean = xs.reduce((a, b) => a + b) / n;
+  final yMean = ys.reduce((a, b) => a + b) / n;
+
+  double mXX = 0, mYY = 0, mXY = 0, mXZ = 0, mYZ = 0, mZZ = 0;
+  for (int i = 0; i < n; i++) {
+    final x = xs[i] - xMean;
+    final y = ys[i] - yMean;
+    final z = x * x + y * y;
+    mXX += x * x;
+    mYY += y * y;
+    mXY += x * y;
+    mXZ += x * z;
+    mYZ += y * z;
+    mZZ += z * z;
+  }
+  mXX /= n;
+  mYY /= n;
+  mXY /= n;
+  mXZ /= n;
+  mYZ /= n;
+  mZZ /= n;
+
+  final mZ = mXX + mYY;
+  final covXY = mXX * mYY - mXY * mXY;
+  final varZ = mZZ - mZ * mZ;
+  final a3 = 4 * mZ;
+  final a2 = -3 * mZ * mZ - mZZ;
+  final a1 = varZ * mZ + 4 * covXY * mZ - mXZ * mXZ - mYZ * mYZ;
+  final a0 = mXZ * (mXZ * mYY - mYZ * mXY) + mYZ * (mYZ * mXX - mXZ * mXY) - varZ * covXY;
+
+  double x = 0;
+  double y = a0;
+  for (int iter = 0; iter < 99; iter++) {
+    final dy = a1 + x * (2 * a2 + x * 3 * a3);
+    final xNew = x - y / dy;
+    if (!xNew.isFinite || xNew == x) break;
+    final yNew = a0 + xNew * (a1 + xNew * (a2 + xNew * a3));
+    if (yNew.abs() >= y.abs()) break;
+    x = xNew;
+    y = yNew;
+  }
+
+  final det = x * x - x * mZ + covXY;
+  if (!det.isFinite || det.abs() < 1e-12) return null;
+  final cx = (mXZ * (mYY - x) - mYZ * mXY) / det / 2;
+  final cy = (mYZ * (mXX - x) - mXZ * mXY) / det / 2;
+  final r = sqrt(cx * cx + cy * cy + mZ);
+  if (!r.isFinite) return null;
+
+  double sumSq = 0;
+  for (int i = 0; i < n; i++) {
+    final d = sqrt(pow(xs[i] - xMean - cx, 2) + pow(ys[i] - yMean - cy, 2)) - r;
+    sumSq += d * d;
+  }
+  return CircleFit(cx + xMean, cy + yMean, r, sqrt(sumSq / n));
+}
+
+/// Smallest arc (radians) that holds all [headings]. Handles the wrap at north.
+double headingSpan(Iterable<double> headings) {
+  final angles = headings.map((h) => h % (2 * pi)).toList()..sort();
+  if (angles.length < 2) return 0;
+  double maxGap = angles.first + 2 * pi - angles.last;
+  for (int i = 1; i < angles.length; i++) {
+    maxGap = max(maxGap, angles[i] - angles[i - 1]);
+  }
+  return 2 * pi - maxGap;
+}
+
+class WindEstimate {
+  /// m/s, toward
+  final double east;
+  final double north;
+
+  /// m/s
+  final double airspeed;
+
+  /// Meters MSL
+  final double alt;
+
+  /// Milliseconds since epoch
+  final int time;
+
+  const WindEstimate(
+      {required this.east, required this.north, required this.airspeed, required this.alt, required this.time});
+
+  double get speed => sqrt(east * east + north * north);
+}
+
+/// GPS sample used for the wind fit.
+class _TurnSample {
+  final int time;
+  final double alt;
+
+  /// Radians
+  final double hdg;
+
+  /// m/s
+  final double spd;
+
+  const _TurnSample(this.time, this.alt, this.hdg, this.spd);
+}
+
+/// Fits the wind over each quarter turn (or more) of a climb.
+///
+/// Ground speed vectors around a turn lie on a circle: the center is the wind, the radius the airspeed. Samples are
+/// used once: after a fit the next one starts fresh, so each band gets independent estimates.
+class QuarterTurnWindFitter {
+  /// Heading change needed for a fit
+  static const double minSpan = pi / 2;
+  static const int minSamples = 5;
+
+  /// A quarter turn shorter than this is a snap turn, not a steady one.
+  static const int minDurationMs = 6000;
+  static const int maxAgeMs = 60000;
+
+  /// Samples more than this far below the newest one are dropped (meters). 150 ft.
+  static const double maxAltSpan = 45.72;
+
+  static const double minAirspeed = 3;
+  static const double maxAirspeed = 30;
+
+  /// Max RMS fit error, as a fraction of airspeed
+  static const double maxRelRms = 0.15;
+
+  final List<_TurnSample> _samples = [];
+
+  int get sampleCount => _samples.length;
+
+  /// Heading change covered by the current samples (radians)
+  double get span => headingSpan(_samples.map((s) => s.hdg));
+
+  void reset() => _samples.clear();
+
+  /// Add a GPS sample taken during a steady climb. Returns an estimate when the samples cover enough of a turn.
+  WindEstimate? add({required int time, required double alt, required double hdg, required double spd}) {
+    if (!spd.isFinite || !hdg.isFinite || spd <= 0) return null;
+    _samples.add(_TurnSample(time, alt, hdg, spd));
+    _samples.removeWhere((s) => time - s.time > maxAgeMs || alt - s.alt > maxAltSpan);
+
+    if (_samples.length < minSamples) return null;
+    if (time - _samples.first.time < minDurationMs) return null;
+    if (span < minSpan) return null;
+
+    final fit = fitCircleTaubin(
+        _samples.map((s) => s.spd * sin(s.hdg)).toList(), _samples.map((s) => s.spd * cos(s.hdg)).toList());
+    final count = _samples.length;
+    final meanAlt = _samples.map((s) => s.alt).reduce((a, b) => a + b) / count;
+
+    // Start the next fit from here either way. A bad fit means the samples weren't a steady turn.
+    final last = _samples.last;
+    _samples
+      ..clear()
+      ..add(last);
+
+    if (fit == null || fit.r < minAirspeed || fit.r > maxAirspeed) return null;
+    if (sqrt(fit.cx * fit.cx + fit.cy * fit.cy) >= fit.r * 0.9) return null;
+    if (fit.rms > fit.r * maxRelRms) return null;
+    return WindEstimate(east: fit.cx, north: fit.cy, airspeed: fit.r, alt: meanAlt, time: time);
+  }
+}
+
+/// Wind estimates in one altitude band.
+class WindBand {
+  double east;
+  double north;
+  double airspeed;
+  int count;
+
+  /// Milliseconds since epoch of the newest estimate
+  int updated;
+
+  WindBand({required this.east, required this.north, required this.airspeed, this.count = 1, required this.updated});
+
+  double get speed => sqrt(east * east + north * north);
+
+  /// Radians. Direction the wind blows from.
+  double get fromHdg => (atan2(-east, -north) + 2 * pi) % (2 * pi);
+
+  /// Blend in a new estimate. Newer estimates count more, so the band follows the wind as it changes.
+  void add(WindEstimate est) {
+    final weight = max(0.3, 1 / (count + 1));
+    east += (est.east - east) * weight;
+    north += (est.north - north) * weight;
+    airspeed += (est.airspeed - airspeed) * weight;
+    count++;
+    updated = max(updated, est.time);
+  }
+
+  Map<String, dynamic> toJson() => {"e": east, "n": north, "a": airspeed, "c": count, "t": updated};
+
+  factory WindBand.fromJson(Map<String, dynamic> json) => WindBand(
+      east: (json["e"] as num).toDouble(),
+      north: (json["n"] as num).toDouble(),
+      airspeed: (json["a"] as num).toDouble(),
+      count: json["c"] as int,
+      updated: json["t"] as int);
+}
+
+/// Wind by altitude, built from observed wind only.
+class WindTable {
+  /// Keyed by band index: floor(alt / [windBandHeight]). Altitudes are meters MSL.
+  final Map<int, WindBand> bands = {};
+
+  WindTable();
+
+  bool get isEmpty => bands.isEmpty;
+
+  static int bandFor(double alt) => (alt / windBandHeight).floor();
+
+  /// Middle of a band (meters MSL)
+  static double bandCenter(int band) => (band + 0.5) * windBandHeight;
+
+  void add(WindEstimate est) {
+    final band = bandFor(est.alt);
+    final existing = bands[band];
+    if (existing == null) {
+      bands[band] = WindBand(east: est.east, north: est.north, airspeed: est.airspeed, updated: est.time);
+    } else {
+      existing.add(est);
+    }
+  }
+
+  /// Drop bands with nothing newer than [maxAge]. Returns true if any were dropped.
+  bool expire(int nowMs, {Duration maxAge = windTableMaxAge}) {
+    final before = bands.length;
+    bands.removeWhere((_, b) => nowMs - b.updated > maxAge.inMilliseconds);
+    return bands.length != before;
+  }
+
+  void clear() => bands.clear();
+
+  /// Wind at [alt] (meters MSL). Interpolated between bands, and held constant above the top band and below the
+  /// bottom one.
+  WindVector? windAt(double alt) {
+    if (bands.isEmpty) return null;
+    final keys = bands.keys.toList()..sort();
+    final x = alt / windBandHeight - 0.5;
+    if (x <= keys.first) return (east: bands[keys.first]!.east, north: bands[keys.first]!.north);
+    if (x >= keys.last) return (east: bands[keys.last]!.east, north: bands[keys.last]!.north);
+    for (int i = 1; i < keys.length; i++) {
+      if (x <= keys[i]) {
+        final lo = bands[keys[i - 1]]!;
+        final hi = bands[keys[i]]!;
+        final t = (x - keys[i - 1]) / (keys[i] - keys[i - 1]);
+        return (east: lo.east + (hi.east - lo.east) * t, north: lo.north + (hi.north - lo.north) * t);
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic> toJson() => bands.map((k, v) => MapEntry(k.toString(), v.toJson()));
+
+  factory WindTable.fromJson(Map<String, dynamic> json) {
+    final table = WindTable();
+    json.forEach((k, v) => table.bands[int.parse(k)] = WindBand.fromJson(v as Map<String, dynamic>));
+    return table;
+  }
+}
+
+/// Altitude step used when integrating drift (meters)
+const double _driftStep = 10;
+
+/// How far the wind carries something descending from [from] to [to] (meters, [to] < [from]) at [rate] m/s.
+///
+/// Meters east and north. Null when the wind isn't known.
+WindVector? drift(WindAt windAt, {required double from, required double to, required double rate}) {
+  if (rate <= 0) return null;
+  if (from <= to) return (east: 0, north: 0);
+  final steps = max(1, ((from - to) / _driftStep).ceil());
+  final dz = (from - to) / steps;
+  double east = 0, north = 0;
+  for (int i = 0; i < steps; i++) {
+    final w = windAt(from - (i + 0.5) * dz);
+    if (w == null) return null;
+    east += w.east * dz / rate;
+    north += w.north * dz / rate;
+  }
+  return (east: east, north: north);
+}
+
+/// Why the wind table isn't recording right now, or null when it is.
+///
+/// Only a sustained powered climb is used: acro, the engine-off glide, and taxiing all spoil the fit.
+/// [height] is meters above the ground, [vario] and [varioNow] are smoothed and instantaneous climb rates (m/s), and
+/// [maxG] is the most g pulled in the last couple seconds.
+String? windTableGate({required double? height, required double vario, required double? varioNow, double? maxG}) {
+  if (height == null) return "No ground elevation";
+  if (height < 30.48) return "Below 100 ft";
+  if (vario < 0.762 || (varioNow != null && varioNow < 0.762)) return "Not climbing 150 ft/min";
+  if (maxG != null && maxG >= 1.3) return "Pulling g";
+  return null;
+}

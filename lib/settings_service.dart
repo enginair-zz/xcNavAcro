@@ -33,6 +33,9 @@ class SettingConfig<T> {
 
   final T Function(T value)? setter;
 
+  /// Called when the setting's title is tapped in the settings editor (e.g. to open more options).
+  void Function()? onTap;
+
   ValueListenable<T> get listenable => _value;
 
   T get value {
@@ -260,6 +263,7 @@ class SettingsMgr {
   late final SettingConfig<bool> forceGpsAltitude;
   late final SettingConfig<int> gpsUpdateInterval;
   late final SettingAction flightDetection;
+  late final SettingConfig<bool> acroMode;
   late final SettingConfig<double> launchMinSpeed;
   late final SettingConfig<double> launchMaxSpeed;
   late final SettingConfig<bool> launchUseAgl;
@@ -275,6 +279,13 @@ class SettingsMgr {
   late final SettingConfig<double> landingMaxAgl;
   late final SettingConfig<int> landingHoldTime;
   late final SettingConfig<bool> landingUseSp140Armed;
+
+  // --- Acro (edited in acro mode dialog)
+  late final SettingConfig<double> acroHardDeck;
+  late final SettingConfig<double> acroReserve1Rate;
+  late final SettingConfig<double> acroReserve2Rate;
+  late final SettingConfig<double> acroDescentRate;
+  late final SettingConfig<int> acroDescentRuns;
 
   // --- Debug Tools
   late final SettingConfig<bool> spoofLocation;
@@ -456,6 +467,23 @@ class SettingsMgr {
 
     flightDetection = SettingAction(this, "Experimental", () => null,
         title: "flight_detection", actionIcon: const Icon(Icons.flight_takeoff));
+
+    acroMode = SettingConfig(this, prefs, "Experimental", "acroMode", false,
+        title: "acro_mode",
+        icon: const Icon(Icons.loop),
+        description: "Wind table, learned acro descent rate, and reserve landing spots around the \"Acro\" waypoint.");
+
+    // --- Acro (edited in acro mode dialog). Meters and m/s.
+    acroHardDeck = SettingConfig(this, prefs, "Acro", "acroHardDeck", 304.8,
+        title: "Acro Hard Deck", hidden: true, setter: (value) => value.clamp(0.0, 3000.0));
+    acroReserve1Rate = SettingConfig(this, prefs, "Acro", "acroReserve1Rate", 587 / 196.85,
+        title: "Acro Reserve 1 Descent Rate", hidden: true, setter: (value) => value.clamp(0.0, 20.0));
+    acroReserve2Rate = SettingConfig(this, prefs, "Acro", "acroReserve2Rate", 0.0,
+        title: "Acro Reserve 2 Descent Rate", hidden: true, setter: (value) => value.clamp(0.0, 20.0));
+    acroDescentRate = SettingConfig(this, prefs, "Acro", "acroDescentRate", 1000 / 196.85,
+        title: "Acro Descent Rate", hidden: true, setter: (value) => value.clamp(0.5, 40.0));
+    acroDescentRuns = SettingConfig(this, prefs, "Acro", "acroDescentRuns", 0,
+        title: "Acro Descent Rate Runs", hidden: true, setter: (value) => value < 0 ? 0 : value);
 
     // --- Launch / Landing detection (edited in flight detection dialog)
     const launchDefaults = LaunchDetectorConfig();

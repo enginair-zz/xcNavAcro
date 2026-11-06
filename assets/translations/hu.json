@@ -131,6 +131,7 @@
             "force_gps_altitude": "Csak GPS használata magasságméréshez",
             "gps_update_interval": "GPS frissítési intervallum (ms)",
             "flight_detection": "Felszállás és leszállás érzékelése",
+            "acro_mode": "Akró mód",
             "group_view_includes_waypoints": "A csoportnézet tartalmazza az útvonalpontokat",
             "Distance": "Távolság",
             "Speed": "Sebesség",
