@@ -54,6 +54,8 @@ android {
         // For local_notifications
         multiDexEnabled true
 
+        manifestPlaceholders += [appLabel: "xcnav"]
+
         // testInstrumentationRunner "pl.leancode.patrol.PatrolJUnitRunner"
         // testInstrumentationRunnerArguments clearPackageData: "true"
     }
@@ -69,6 +71,11 @@ android {
     buildTypes {
         release {
             signingConfig signingConfigs.release
+        }
+        // Installs next to the store app, so test builds don't replace it (or its logs)
+        debug {
+            applicationIdSuffix ".acro"
+            manifestPlaceholders += [appLabel: "xcNav Acro"]
         }
     }
 

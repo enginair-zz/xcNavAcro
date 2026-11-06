@@ -22,6 +22,8 @@ import 'package:xcnav/views/view_elevation.dart';
 import 'package:xcnav/views/view_map.dart';
 import 'package:xcnav/views/view_waypoints.dart';
 import 'package:xcnav/views/view_wind_table.dart';
+import 'package:xcnav/providers/active_plan.dart';
+import 'package:xcnav/services/acro_service.dart';
 
 // widgets
 import 'package:xcnav/widgets/top_instruments.dart';
@@ -43,11 +45,17 @@ class _MyHomePageState extends State<MyHomePage> {
   int viewPageIndex = 1;
   final pageIndexNames = ["Menu", "Map", "Side", "Points", "Chat", "Wind"];
 
+  late final ActivePlan plan = Provider.of<ActivePlan>(context, listen: false);
+
   @override
   void dispose() {
     settingsMgr.acroMode.listenable.removeListener(onAcroMode);
+    plan.removeListener(onPlanChanged);
+    myTelemetry.removeListener(onPlanChanged);
     super.dispose();
   }
+
+  void onPlanChanged() => acroService.onPlanChanged(plan);
 
   /// The Wind page only exists in acro mode.
   void onAcroMode() {
@@ -64,6 +72,9 @@ class _MyHomePageState extends State<MyHomePage> {
     super.initState();
 
     settingsMgr.acroMode.listenable.addListener(onAcroMode);
+    plan.addListener(onPlanChanged);
+    // The plan loads from storage without notifying, so also check as telemetry comes in
+    myTelemetry.addListener(onPlanChanged);
 
     myTelemetry.addListener(() {
       if (viewMapKey.currentState?.mapReady ?? false) {

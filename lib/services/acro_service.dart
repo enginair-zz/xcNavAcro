@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xcnav/audio_cue_service.dart';
 import 'package:xcnav/dem_service.dart';
@@ -18,6 +19,7 @@ import 'package:xcnav/settings_service.dart';
 import 'package:xcnav/tts_service.dart';
 import 'package:xcnav/units.dart';
 import 'package:xcnav/util.dart';
+import 'package:xcnav/widgets/waypoint_marker.dart' show colorOptions;
 
 typedef GroundAt = double? Function(LatLng latlng);
 
@@ -61,7 +63,44 @@ class AcroService with ChangeNotifier {
   AcroService({this.groundAt = _sampleGround});
 
   int _lastGTime = 0;
+  int _lastRotationTime = 0;
   bool _loaded = false;
+
+  /// Rotation rate (degrees per second, any axis), averaged every 100 ms. Only the last few seconds are kept.
+  final List<TimestampValue<double>> rotationRecord = [];
+  StreamSubscription<GyroscopeEvent>? _gyro;
+  int _gyroWindowStart = 0;
+  double _gyroX = 0, _gyroY = 0, _gyroZ = 0;
+  int _gyroCount = 0;
+
+  /// The gyroscope only runs in flight with acro mode on, to save battery.
+  void startGyro() {
+    if (_gyro != null) return;
+    _gyroWindowStart = DateTime.now().millisecondsSinceEpoch;
+    _gyro = gyroscopeEventStream(samplingPeriod: const Duration(milliseconds: 10)).listen((event) {
+      _gyroX += event.x;
+      _gyroY += event.y;
+      _gyroZ += event.z;
+      _gyroCount++;
+      final time = event.timestamp.millisecondsSinceEpoch;
+      if (time > _gyroWindowStart + 100) {
+        final radPerSec = sqrt(pow(_gyroX / _gyroCount, 2) + pow(_gyroY / _gyroCount, 2) + pow(_gyroZ / _gyroCount, 2));
+        rotationRecord.add(TimestampValue<double>(time, radPerSec * 180 / pi));
+        rotationRecord.removeWhere((r) => time - r.time > 10000);
+        _gyroWindowStart = time;
+        _gyroX = _gyroY = _gyroZ = 0;
+        _gyroCount = 0;
+      }
+    }, onError: (err) => debugPrint("Gyroscope unavailable: $err"));
+  }
+
+  void stopGyro() {
+    _gyro?.cancel();
+    _gyro = null;
+    _gyroCount = 0;
+    _gyroX = _gyroY = _gyroZ = 0;
+  }
+
   Timer? _saveTimer;
   static const _prefsKey = "acro.windTable";
 
@@ -92,6 +131,26 @@ class AcroService with ChangeNotifier {
     });
   }
 
+  bool _hadAcroWaypoint = false;
+
+  /// Acro waypoints are always purple, and adding one turns acro mode on.
+  void onPlanChanged(ActivePlan plan) {
+    final purple = colorOptions["purple"]!.toARGB32();
+    final toRecolor = plan.waypoints.values.where((wp) => isAcroWaypoint(wp) && wp.color != purple).toList();
+    final hasAcro = findAcroWaypoint(plan.waypoints.values) != null;
+    if (hasAcro && !_hadAcroWaypoint) settingsMgr.acroMode.value = true;
+    _hadAcroWaypoint = hasAcro;
+    // Not while the plan is still notifying
+    if (toRecolor.isNotEmpty) {
+      scheduleMicrotask(() {
+        for (final wp in toRecolor) {
+          wp.color = purple;
+          plan.updateWaypoint(wp);
+        }
+      });
+    }
+  }
+
   void clearTable() {
     table.clear();
     fitter.reset();
@@ -101,15 +160,16 @@ class AcroService with ChangeNotifier {
   }
 
   /// Read the app state and settings, then [update]. Learns from finished runs and calls out the hard deck.
-  void handleGeo(BuildContext context, Geo geo, Geo? prev,
-      {required double vario, required List<TimestampValue<double>> gForce, double? launchAlt}) {
+  void handleGeo(BuildContext context, Geo geo,
+      {required List<TimestampValue<double>> gForce, double? launchAlt, required bool inFlight}) {
     load();
+    inFlight ? startGyro() : stopGyro();
     final plan = Provider.of<ActivePlan>(context, listen: false);
     final wind = Provider.of<Wind>(context, listen: false).result;
     final hardDeck = settingsMgr.acroHardDeck.value;
-    final run = update(geo, prev,
-        vario: vario,
+    final run = update(geo,
         gForce: gForce,
+        rotation: rotationRecord,
         launchAlt: launchAlt,
         waypoints: plan.waypoints.values,
         currentWind:
@@ -136,10 +196,10 @@ class AcroService with ChangeNotifier {
 
   /// Process a GPS fix. Returns a run when one just finished.
   ///
-  /// [currentWind] is the live wind solution, used while the wind table is empty.
-  AcroRun? update(Geo geo, Geo? prev,
-      {required double vario,
-      required List<TimestampValue<double>> gForce,
+  /// [currentWind] is the live wind solution, used while the wind table is empty. [rotation] is degrees per second.
+  AcroRun? update(Geo geo,
+      {required List<TimestampValue<double>> gForce,
+      List<TimestampValue<double>> rotation = const [],
       double? launchAlt,
       required Iterable<Waypoint> waypoints,
       WindVector? currentWind,
@@ -163,22 +223,34 @@ class AcroService with ChangeNotifier {
     }
     height = groundRef == null ? null : geo.alt - groundRef!;
 
-    // --- G-load
-    double? maxG;
+    // --- G-load and rotation, new samples in time order
+    double? maxG, minG, maxRotation;
     for (int i = gForce.length - 1; i >= 0 && gForce[i].time > now - 2000; i--) {
       maxG = max(maxG ?? 0, gForce[i].value);
+      minG = min(minG ?? double.infinity, gForce[i].value);
     }
-    final firstNew = gForce.indexWhere((g) => g.time > _lastGTime);
-    if (firstNew >= 0) {
-      for (int i = firstNew; i < gForce.length; i++) {
-        runDetector.addG(gForce[i].time, gForce[i].value);
+    for (int i = rotation.length - 1; i >= 0 && rotation[i].time > now - 2000; i--) {
+      maxRotation = max(maxRotation ?? 0, rotation[i].value);
+    }
+    runDetector.armed = height == null || height! > hardDeck;
+    final newG = gForce.where((g) => g.time > _lastGTime).toList();
+    final newRotation = rotation.where((r) => r.time > _lastRotationTime).toList();
+    if (newG.isNotEmpty) _lastGTime = newG.last.time;
+    if (newRotation.isNotEmpty) _lastRotationTime = newRotation.last.time;
+    int gi = 0, ri = 0;
+    while (gi < newG.length || ri < newRotation.length) {
+      if (ri >= newRotation.length || (gi < newG.length && newG[gi].time <= newRotation[ri].time)) {
+        runDetector.addG(newG[gi].time, newG[gi].value);
+        gi++;
+      } else {
+        runDetector.addRotation(newRotation[ri].time, newRotation[ri].value);
+        ri++;
       }
-      _lastGTime = gForce.last.time;
     }
 
     // --- Wind table
-    final varioNow = prev != null && geo.time > prev.time ? (geo.alt - prev.alt) / (geo.time - prev.time) * 1000 : null;
-    tableGate = windTableGate(height: height, vario: vario, varioNow: varioNow, maxG: maxG);
+    tableGate =
+        windTableGate(height: height, acroRun: runDetector.running, minG: minG, maxG: maxG, maxRotation: maxRotation);
     if (tableGate == null) {
       final est = fitter.add(time: now, alt: geo.alt, hdg: geo.hdg, spd: geo.spd);
       if (est != null) {

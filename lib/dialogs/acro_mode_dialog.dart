@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:xcnav/models/acro.dart';
 import 'package:xcnav/providers/active_plan.dart';
+import 'package:xcnav/screens/settings_editor.dart' show pickColor;
 import 'package:xcnav/settings_service.dart';
 import 'package:xcnav/units.dart';
 
@@ -40,7 +41,7 @@ class _AcroModeDialogState extends State<AcroModeDialog> {
   }
 
   /// Number field for a value stored in SI units, but typed in the user's display units.
-  Widget _unitField(SettingConfig<double> setting, UnitType type, {required String label, Key? key}) {
+  Widget _unitField(SettingConfig<double> setting, UnitType type, {required String label, Key? key, Widget? trailing}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(children: [
@@ -58,8 +59,19 @@ class _AcroModeDialogState extends State<AcroModeDialog> {
                 if (parsed != null) setting.value = parsed;
               }),
         ),
+        if (trailing != null) trailing,
       ]),
     );
+  }
+
+  /// Map color swatch. Same color picker as the glide range colors in settings.
+  Widget _colorButton(SettingConfig<Color> setting) {
+    return IconButton(
+        tooltip: "Map color",
+        icon: Icon(Icons.circle, color: setting.value, size: 32),
+        onPressed: () => pickColor(context, setting.value).then((newColor) {
+              if (newColor != null) setState(() => setting.value = newColor);
+            }));
   }
 
   @override
@@ -80,7 +92,7 @@ class _AcroModeDialogState extends State<AcroModeDialog> {
 
             // --- Acro box
             _header(Icons.place, "Acro Box",
-                "Name a waypoint \"$acroWaypointName\" to make it the center of your acro box: where you want to land under reserve."),
+                "Name a waypoint \"$acroWaypointName\" to make it the center of your acro box: where you want to land under reserve. It turns purple and turns acro mode on."),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(children: [
@@ -93,16 +105,18 @@ class _AcroModeDialogState extends State<AcroModeDialog> {
 
             // --- Reserves
             _header(Icons.paragliding, "Reserves",
-                "Descent rate under each reserve. Set reserve 2 to 0 if you only fly one."),
-            _unitField(settingsMgr.acroReserve1Rate, UnitType.vario, label: "Reserve 1"),
-            _unitField(settingsMgr.acroReserve2Rate, UnitType.vario, label: "Reserve 2"),
+                "Descent rate and map color for each reserve. Set reserve 2 to 0 if you only fly one."),
+            _unitField(settingsMgr.acroReserve1Rate, UnitType.vario,
+                label: "Reserve 1 (primary)", trailing: _colorButton(settingsMgr.acroReserve1Color)),
+            _unitField(settingsMgr.acroReserve2Rate, UnitType.vario,
+                label: "Reserve 2", trailing: _colorButton(settingsMgr.acroReserve2Color)),
 
             // --- Acro descent rate
             _header(
                 Icons.trending_down,
                 "Acro Descent Rate",
                 runs == 0
-                    ? "Your guess, until an acro run is measured. Runs start on their own once you pull 1.5 g for a second."
+                    ? "Your guess, until an acro run is measured. Runs start on their own when you stall the wing or turn sharply into a maneuver, above your hard deck."
                     : "Learned from $runs ${runs == 1 ? "run" : "runs"}, and updated after every run."),
             _unitField(settingsMgr.acroDescentRate, UnitType.vario,
                 label: "Average", key: ValueKey("acroDescentRate$descentFieldKey")),

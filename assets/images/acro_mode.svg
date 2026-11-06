@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Upside down paraglider, 3/4 view, wing about to shoot forward (infinity tumble). Pilot is the dot. -->
+  <g transform="rotate(28 11.5 13)">
+    <path d="M2.5 10C2.5 17 6.5 21.5 11 21.5C15.5 21.5 18.8 15 18.8 8.5C17.6 13.4 15 17.4 11 17.6C7 17.8 3.8 14.6 2.5 10Z" fill="#000"/>
+    <path d="M2.9 10.6L11 3.6M18.5 9.2L11 3.6" fill="none" stroke="#000" stroke-width="1" stroke-linecap="round"/>
+    <circle cx="11" cy="3.4" r="2.2" fill="#000"/>
+  </g>
+</svg>

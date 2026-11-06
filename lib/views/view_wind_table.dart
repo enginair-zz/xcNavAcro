@@ -70,8 +70,8 @@ class _ViewWindTableState extends State<ViewWindTable> {
         child: Row(children: [Expanded(child: Text(label, style: _dim)), Text(value)]),
       );
 
-  Widget _windArrow(double towardHdg) => Transform.rotate(
-      angle: towardHdg, child: const Icon(Icons.arrow_upward, size: 18, color: Colors.lightBlueAccent));
+  Widget _windArrow(double towardHdg, {Color? color}) => Transform.rotate(
+      angle: towardHdg, child: Icon(Icons.arrow_upward, size: 18, color: color ?? Colors.lightBlueAccent));
 
   Widget _table(AcroService acro) {
     final ref = acro.groundRef;
@@ -79,10 +79,14 @@ class _ViewWindTableState extends State<ViewWindTable> {
     if (keys.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(8),
-        child: Text("Empty. Fills in from GPS during a steady powered climb, one band per 100 ft.", style: _dim),
+        child:
+            Text("Empty. Fills in from GPS whenever you circle (not during acro), one band per 100 ft.", style: _dim),
       );
     }
     final current = acro.height == null || ref == null ? null : WindTable.bandFor(acro.height! + ref);
+    // Every 100 ft layer from the ground (or the lowest reading) up to the highest reading or the pilot
+    final top = max(keys.first, current ?? keys.first);
+    final bottom = ref == null ? keys.last : min(keys.last, WindTable.bandFor(ref));
     const header = TextStyle(color: Colors.grey, fontSize: 12);
     return Table(
       columnWidths: const {
@@ -103,21 +107,28 @@ class _ViewWindTableState extends State<ViewWindTable> {
           const Text("Fits", style: header),
           const Text("Age", style: header),
         ]),
-        for (final key in keys)
+        for (int key = top; key >= bottom; key--)
           () {
-            final band = acro.table.bands[key]!;
+            final band = acro.table.bands[key];
             final alt = WindTable.bandCenter(key) - (ref ?? 0);
-            final style = TextStyle(color: key == current ? Colors.amber : null);
+            // Layers without their own reading show the interpolated wind the predictions use
+            final wind =
+                band == null ? acro.table.windAt(WindTable.bandCenter(key)) : (east: band.east, north: band.north);
+            final speed = wind == null ? 0.0 : sqrt(wind.east * wind.east + wind.north * wind.north);
+            final fromHdg = wind == null ? 0.0 : (atan2(-wind.east, -wind.north) + 2 * pi) % (2 * pi);
+            final style = TextStyle(
+                color: key == current ? Colors.amber : (band == null ? Colors.grey.shade600 : null),
+                fontStyle: band == null ? FontStyle.italic : null);
             return TableRow(children: [
               Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(_dist(alt), style: style)),
               Row(children: [
-                _windArrow(band.fromHdg + pi),
-                Text(" ${(band.fromHdg * 180 / pi).round().toString().padLeft(3, "0")}°", style: style),
+                _windArrow(fromHdg + pi, color: band == null ? Colors.grey.shade600 : null),
+                Text(" ${(fromHdg * 180 / pi).round().toString().padLeft(3, "0")}°", style: style),
               ]),
-              Text(_speed(band.speed), style: style),
-              Text(_speed(band.airspeed), style: style),
-              Text("${band.count}", style: style),
-              Text(_age(band.updated), style: style),
+              Text(_speed(speed), style: style),
+              Text(band == null ? "-" : _speed(band.airspeed), style: style),
+              Text(band == null ? "-" : "${band.count}", style: style),
+              Text(band == null ? "" : _age(band.updated), style: style),
             ]);
           }(),
       ],
@@ -145,7 +156,7 @@ class _ViewWindTableState extends State<ViewWindTable> {
             _card(
                 "Wind Table",
                 [
-                  _row("Recording", acro.tableGate == null ? "Yes, climbing" : "No: ${acro.tableGate}"),
+                  _row("Recording", acro.tableGate == null ? "Yes" : "No: ${acro.tableGate}"),
                   _row("Turn so far",
                       "${acro.fitter.sampleCount} fixes, ${(acro.fitter.span * 180 / pi).round()}° of 90°"),
                   _row("Heights above", refName),
@@ -207,14 +218,24 @@ class _ViewWindTableState extends State<ViewWindTable> {
             _card("Acro Descent", [
               _row("Average used", _vario(settingsMgr.acroDescentRate.value)),
               _row("Runs learned", "${settingsMgr.acroDescentRuns.value}"),
-              _row("Run in progress", acro.runDetector.running ? "Yes" : "No"),
+              _row("Run in progress",
+                  acro.runDetector.running ? "Yes, ${_entryName(acro.runDetector.runEntry)} entry" : "No"),
+              _row("Rotation now",
+                  acro.rotationRecord.isEmpty ? "no gyro data" : "${acro.rotationRecord.last.value.round()}°/s"),
               if (run != null)
                 _row("Last run",
-                    "${_vario(run.descentRate)}, ${run.duration.inSeconds}s${run.endedAtHardDeck ? ", to hard deck" : ""}${run.accepted ? "" : " (not used)"}"),
+                    "${_entryName(run.entry)}, ${_vario(run.descentRate)}, ${run.duration.inSeconds}s${run.endedAtHardDeck ? ", to hard deck" : ""}${run.accepted ? "" : " (not used)"}"),
             ]),
           ]);
         });
   }
+
+  String _entryName(AcroEntry? entry) => switch (entry) {
+        AcroEntry.stall => "stall",
+        AcroEntry.sharpTurn => "sharp turn",
+        AcroEntry.gLoad => "g-load",
+        null => "-",
+      };
 
   String _fromWp(LatLng wpLatLng, ReserveLanding l) => "${_offset(metersBetween(wpLatLng, l.landAt))} of Acro";
 }

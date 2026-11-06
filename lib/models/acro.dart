@@ -12,15 +12,12 @@ const double _metersPerDegLat = pi * 6371009 / 180;
 /// Name of the waypoint that marks the center of the acro box. Case and surrounding spaces don't matter.
 const String acroWaypointName = "Acro";
 
-/// First single-point waypoint named [acroWaypointName].
-Waypoint? findAcroWaypoint(Iterable<Waypoint> waypoints) {
-  for (final wp in waypoints) {
-    if (!wp.isPath && wp.latlng.isNotEmpty && wp.name.trim().toLowerCase() == acroWaypointName.toLowerCase()) {
-      return wp;
-    }
-  }
-  return null;
-}
+/// A single-point waypoint named [acroWaypointName].
+bool isAcroWaypoint(Waypoint wp) =>
+    !wp.isPath && wp.latlng.isNotEmpty && wp.name.trim().toLowerCase() == acroWaypointName.toLowerCase();
+
+/// First acro waypoint (see [isAcroWaypoint]).
+Waypoint? findAcroWaypoint(Iterable<Waypoint> waypoints) => waypoints.where(isAcroWaypoint).firstOrNull;
 
 /// [latlng] moved [east] and [north] meters. Flat earth: fine over the few miles of an acro box.
 LatLng offsetMeters(LatLng latlng, double east, double north) => LatLng(latlng.latitude + north / _metersPerDegLat,
@@ -38,6 +35,18 @@ WindVector metersBetween(LatLng from, LatLng to) => (
 //
 // ============================================================================================
 
+/// What started an acro run.
+enum AcroEntry {
+  /// The wing stalled: the pilot dropped, so g fell well under 1.
+  stall,
+
+  /// A hard turn or spin-up: the phone rotated fast.
+  sharpTurn,
+
+  /// Sustained g with no stall or fast rotation seen (e.g. no gyroscope).
+  gLoad,
+}
+
 class AcroRun {
   /// Milliseconds since epoch
   final int start;
@@ -46,6 +55,8 @@ class AcroRun {
   /// Meters
   final double startAlt;
   final double endAlt;
+
+  final AcroEntry entry;
 
   /// Ended by passing the hard deck (otherwise the pilot stopped maneuvering)
   final bool endedAtHardDeck;
@@ -58,6 +69,7 @@ class AcroRun {
       required this.end,
       required this.startAlt,
       required this.endAlt,
+      required this.entry,
       required this.endedAtHardDeck,
       required this.accepted});
 
@@ -67,14 +79,27 @@ class AcroRun {
   double get descentRate => end > start ? (startAlt - endAlt) / (end - start) * 1000 : 0;
 }
 
-/// Finds acro runs from g-load and measures how fast they came down.
+/// Finds acro runs from the entry into a maneuver, and measures how fast they came down.
 ///
-/// A run starts once g holds at [startG] or more for [holdMs] (backdated to the first high-g sample), so the straight
-/// engine-off setup glide doesn't count. It ends at the hard deck, or once g stays under [quietG] for [quietMs].
+/// A run starts on a stall (g under [stallG] for [stallHoldMs]) or a sharp turn (rotation at [turnRate] or more for
+/// [turnHoldMs]), backdated to where the entry began. Sustained g ([startG] for [gHoldMs]) also starts one, for phones
+/// without a gyroscope. Runs only start while [armed] (above the hard deck), so landing flares don't count.
+///
+/// A run ends at the hard deck, or once nothing acro-like ([quietG], [quietLowG], [quietRate]) is seen for [quietMs].
 class AcroRunDetector {
+  static const double stallG = 0.5;
+  static const int stallHoldMs = 300;
+
+  /// Degrees per second, total rotation in any direction (works with the phone in a pocket)
+  static const double turnRate = 60;
+  static const int turnHoldMs = 1000;
+
   static const double startG = 1.5;
-  static const int holdMs = 1000;
+  static const int gHoldMs = 1000;
+
   static const double quietG = 1.3;
+  static const double quietLowG = 0.7;
+  static const double quietRate = 30;
   static const int quietMs = 20000;
 
   /// Shortest run worth learning from
@@ -91,19 +116,28 @@ class AcroRunDetector {
   final List<(int, double)> _alts = [];
   static const int _altHistoryMs = 180000;
 
+  /// Runs may start. Set false below the hard deck.
+  bool armed = true;
+
+  int? _lowSince;
   int? _highSince;
-  int? _lastHigh;
+  int? _turnSince;
+  int? _lastActive;
 
   /// Start of the run in progress (ms)
   int? runStart;
+  AcroEntry? runEntry;
 
   bool get running => runStart != null;
 
   void reset() {
     _alts.clear();
+    _lowSince = null;
     _highSince = null;
-    _lastHigh = null;
+    _turnSince = null;
+    _lastActive = null;
     runStart = null;
+    runEntry = null;
   }
 
   void addAlt(int time, double alt) {
@@ -128,39 +162,74 @@ class AcroRunDetector {
     return _alts.last.$2;
   }
 
+  void _start(int since, AcroEntry entry) {
+    if (running || !armed) return;
+    runStart = since;
+    runEntry = entry;
+  }
+
+  /// G-load magnitude (1 = level flight)
   void addG(int time, double g) {
+    if (g < stallG) {
+      _lowSince ??= time;
+      if (time - _lowSince! >= stallHoldMs) _start(_lowSince!, AcroEntry.stall);
+    } else {
+      _lowSince = null;
+    }
     if (g >= startG) {
       _highSince ??= time;
-      if (!running && time - _highSince! >= holdMs) runStart = _highSince;
+      if (time - _highSince! >= gHoldMs) _start(_highSince!, AcroEntry.gLoad);
     } else {
       _highSince = null;
     }
-    if (g >= quietG) _lastHigh = time;
+    if (g >= quietG || g < quietLowG) _lastActive = time;
+  }
+
+  /// Rotation rate (degrees per second, any axis)
+  void addRotation(int time, double degPerSec) {
+    if (degPerSec >= turnRate) {
+      _turnSince ??= time;
+      if (time - _turnSince! >= turnHoldMs) _start(_turnSince!, AcroEntry.sharpTurn);
+    } else {
+      _turnSince = null;
+    }
+    if (degPerSec >= quietRate) _lastActive = time;
   }
 
   /// Check whether the run in progress has ended. [height] and [hardDeck] are meters above the ground.
   AcroRun? update(int now, {required double? height, required double hardDeck}) {
     final start = runStart;
-    if (start == null) return null;
+    final entry = runEntry;
+    if (start == null || entry == null) return null;
+    final lastActive = max(_lastActive ?? start, start);
     int? end;
     bool atHardDeck = false;
     if (height != null && height <= hardDeck && now > start) {
       end = now;
       atHardDeck = true;
-    } else if (now - (_lastHigh ?? start) >= quietMs) {
-      end = _lastHigh ?? start;
+    } else if (now - lastActive >= quietMs) {
+      end = lastActive;
     }
     if (end == null) return null;
 
     runStart = null;
+    runEntry = null;
+    _lowSince = null;
     _highSince = null;
+    _turnSince = null;
     final startAlt = altAt(start);
     final endAlt = altAt(end);
     if (startAlt == null || endAlt == null) return null;
-    final rate = (startAlt - endAlt) / (end - start) * 1000;
+    final rate = end > start ? (startAlt - endAlt) / (end - start) * 1000 : 0;
     final ok = end - start >= minDurationMs && startAlt - endAlt >= minDrop && rate >= minRate && rate <= maxRate;
     return AcroRun(
-        start: start, end: end, startAlt: startAlt, endAlt: endAlt, endedAtHardDeck: atHardDeck, accepted: ok);
+        start: start,
+        end: end,
+        startAlt: startAlt,
+        endAlt: endAlt,
+        entry: entry,
+        endedAtHardDeck: atHardDeck,
+        accepted: ok);
   }
 }
 
@@ -196,6 +265,9 @@ class ReserveLanding {
   /// Reserve descent rate (m/s)
   final double rate;
 
+  /// Which reserve: index into the reserve rates given to [predictReserveLandings]
+  final int reserve;
+
   final LatLng throwAt;
   final LatLng landAt;
 
@@ -208,6 +280,7 @@ class ReserveLanding {
   const ReserveLanding(
       {required this.throwHeight,
       required this.rate,
+      required this.reserve,
       required this.throwAt,
       required this.landAt,
       required this.radius,
@@ -249,7 +322,11 @@ ReservePrediction? predictReserveLandings(
     required List<double> reserveRates,
     required WindAt windAt,
     LatLng? target}) {
-  final rates = reserveRates.where((r) => r > 0).toList();
+  // Reserves in use: (index, rate)
+  final rates = [
+    for (int i = 0; i < reserveRates.length; i++)
+      if (reserveRates[i] > 0) (i, reserveRates[i])
+  ];
   if (rates.isEmpty || acroRate <= 0 || height <= 0) return null;
 
   final bottom = max(0.0, min(height, hardDeck));
@@ -265,7 +342,7 @@ ReservePrediction? predictReserveLandings(
     if (run == null) return null;
     final throwAt = offsetMeters(from, run.east, run.north);
     final lowerThird = steps == 0 || throwHeight <= lowerThirdTop + 1e-6;
-    for (final rate in rates) {
+    for (final (reserve, rate) in rates) {
       final under = drift(windAt, from: throwHeight, to: 0, rate: rate);
       if (under == null) return null;
       final east = run.east + under.east;
@@ -275,6 +352,7 @@ ReservePrediction? predictReserveLandings(
       landings.add(ReserveLanding(
           throwHeight: throwHeight,
           rate: rate,
+          reserve: reserve,
           throwAt: throwAt,
           landAt: offsetMeters(from, east, north),
           radius: reserveSpotBase + reserveSpotGrowth * driftDist,
@@ -378,6 +456,31 @@ GlideRange reserveZoneRange(List<ReserveLanding> landings) {
       params: const GlideRangeParams(alt: 0, glideRatio: 1, margin: 0),
       excess: excess,
       unknown: Uint8List(n * n),
+      touchesEdge: false,
+      hasUnknown: false);
+}
+
+/// [zone] with every cell that falls inside [cut] removed. The grids don't need to line up.
+GlideRange subtractZone(GlideRange zone, GlideRange cut) {
+  final n = zone.grid.size;
+  final excess = Float32List.fromList(zone.excess);
+  final cutGrid = cut.grid;
+  for (int row = 0; row < n; row++) {
+    for (int col = 0; col < n; col++) {
+      if (excess[row * n + col].isNaN) continue;
+      final m = metersBetween(cutGrid.origin, zone.grid.cellCenter(row, col));
+      final r = cutGrid.halfSize - (m.north / cutGrid.cellSize).round();
+      final c = cutGrid.halfSize + (m.east / cutGrid.cellSize).round();
+      if (r >= 0 && c >= 0 && r < cutGrid.size && c < cutGrid.size && cut.isReachable(r, c)) {
+        excess[row * n + col] = double.nan;
+      }
+    }
+  }
+  return GlideRange(
+      grid: zone.grid,
+      params: zone.params,
+      excess: excess,
+      unknown: zone.unknown,
       touchesEdge: false,
       hasUnknown: false);
 }

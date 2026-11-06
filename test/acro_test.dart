@@ -5,10 +5,14 @@ import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xcnav/models/acro.dart';
 import 'package:xcnav/models/geo.dart';
+import 'package:xcnav/models/glide_range.dart';
 import 'package:xcnav/models/waypoint.dart';
 import 'package:xcnav/models/wind_table.dart';
+import 'package:xcnav/providers/active_plan.dart';
 import 'package:xcnav/services/acro_service.dart';
+import 'package:xcnav/settings_service.dart';
 import 'package:xcnav/util.dart';
+import 'package:xcnav/widgets/waypoint_marker.dart' show colorOptions;
 
 const origin = LatLng(40, -105);
 
@@ -102,13 +106,16 @@ void main() {
       }
     });
 
-    test("only records in a powered climb", () {
-      expect(windTableGate(height: 200, vario: 2, varioNow: 2), isNull);
-      expect(windTableGate(height: null, vario: 2, varioNow: 2), isNotNull);
-      expect(windTableGate(height: 20, vario: 2, varioNow: 2), isNotNull);
-      expect(windTableGate(height: 200, vario: 0.5, varioNow: 2), isNotNull);
-      expect(windTableGate(height: 200, vario: 2, varioNow: -1), isNotNull);
-      expect(windTableGate(height: 200, vario: 2, varioNow: 2, maxG: 1.4), isNotNull);
+    test("records in any normal flight, never in acro", () {
+      // Climbing, level or gliding: all fine
+      expect(windTableGate(height: 200, acroRun: false, minG: 0.9, maxG: 1.2, maxRotation: 25), isNull);
+      expect(windTableGate(height: 200, acroRun: false), isNull);
+      expect(windTableGate(height: null, acroRun: false), isNotNull);
+      expect(windTableGate(height: 20, acroRun: false), isNotNull);
+      expect(windTableGate(height: 200, acroRun: true), isNotNull);
+      expect(windTableGate(height: 200, acroRun: false, maxG: 1.4), isNotNull);
+      expect(windTableGate(height: 200, acroRun: false, minG: 0.5), isNotNull);
+      expect(windTableGate(height: 200, acroRun: false, maxRotation: 70), isNotNull);
     });
   });
 
@@ -124,6 +131,12 @@ void main() {
       expect(table.windAt(0)!.east, 2);
       expect(table.windAt(10000)!.east, 12);
       expect(WindTable().windAt(100), isNull);
+    });
+
+    test("a turn fills every band it passed through", () {
+      final table = WindTable()
+        ..add(const WindEstimate(east: 3, north: 0, airspeed: 12, alt: 60, minAlt: 20, maxAlt: 95, time: 0));
+      expect(table.bands.keys.toList()..sort(), [0, 1, 2, 3]);
     });
 
     test("newer estimates count more", () {
@@ -193,6 +206,7 @@ void main() {
       expect(run.descentRate, closeTo(5, 0.1));
       // Backdated to the first high-g sample
       expect(run.start, 10500);
+      expect(run.entry, AcroEntry.gLoad);
     });
 
     test("ends once the pilot stops maneuvering", () {
@@ -216,6 +230,67 @@ void main() {
       }
       detector.addG(800, 1.0);
       expect(detector.running, isFalse);
+    });
+
+    test("stall entry starts a run where the drop began", () {
+      final detector = AcroRunDetector();
+      for (int t = 0; t < 20; t++) {
+        detector.addG(t * 100, 1.0);
+      }
+      for (int t = 20; t < 26; t++) {
+        detector.addG(t * 100, 0.3);
+      }
+      expect(detector.running, isTrue);
+      expect(detector.runEntry, AcroEntry.stall);
+      expect(detector.runStart, 2000);
+    });
+
+    test("a brief low-g bump isn't a stall", () {
+      final detector = AcroRunDetector();
+      detector.addG(0, 0.3);
+      detector.addG(100, 0.3);
+      detector.addG(200, 1.0);
+      expect(detector.running, isFalse);
+    });
+
+    test("sharp turn starts a run where the rotation began", () {
+      final detector = AcroRunDetector();
+      for (int t = 0; t <= 12; t++) {
+        detector.addRotation(5000 + t * 100, 90);
+      }
+      expect(detector.running, isTrue);
+      expect(detector.runEntry, AcroEntry.sharpTurn);
+      expect(detector.runStart, 5000);
+    });
+
+    test("normal turns don't start a run", () {
+      final detector = AcroRunDetector();
+      for (int t = 0; t <= 300; t++) {
+        detector.addRotation(t * 100, 25);
+        detector.addG(t * 100, 1.2);
+      }
+      expect(detector.running, isFalse);
+    });
+
+    test("nothing starts below the hard deck", () {
+      final detector = AcroRunDetector()..armed = false;
+      for (int t = 0; t <= 20; t++) {
+        detector.addRotation(t * 100, 90);
+        detector.addG(t * 100, 0.2);
+      }
+      expect(detector.running, isFalse);
+    });
+
+    test("rotating keeps the run going without g", () {
+      final detector = AcroRunDetector();
+      detector.addAlt(0, 1000);
+      for (int t = 0; t <= 300; t++) {
+        detector.addRotation(t * 100, t < 20 ? 90 : 40);
+        detector.addG(t * 100, 1.0);
+      }
+      detector.addAlt(30000, 850);
+      expect(detector.update(30000, height: 550, hardDeck: 300), isNull);
+      expect(detector.running, isTrue);
     });
 
     test("short runs aren't learned from", () {
@@ -258,6 +333,11 @@ void main() {
           from: origin, height: 900, hardDeck: 300, acroRate: 5, reserveRates: [3, 4.5, 0], windAt: eastWind(5))!;
       expect(p.throwNow.length, 2);
       expect(p.landings.length, 2 * (reserveThrowSteps + 1));
+      expect(p.landings.map((l) => l.reserve).toSet(), {0, 1});
+      // Only reserve 2 set: still tagged as reserve 2
+      final second = predictReserveLandings(
+          from: origin, height: 900, hardDeck: 300, acroRate: 5, reserveRates: [0, 4.5], windAt: eastWind(5))!;
+      expect(second.landings.map((l) => l.reserve).toSet(), {1});
     });
 
     test("below the hard deck it's just throw now", () {
@@ -323,6 +403,41 @@ void main() {
     });
   });
 
+  group("zone cutout", () {
+    test("reserve 1 is cut where it overlaps reserve 2", () {
+      final p = predictReserveLandings(
+          from: origin, height: 900, hardDeck: 300, acroRate: 5, reserveRates: [3, 3.6], windAt: eastWind(5))!;
+      final first = reserveZoneRange(p.landings.where((l) => l.reserve == 0).toList());
+      final second = reserveZoneRange(p.landings.where((l) => l.reserve == 1).toList());
+      final cut = subtractZone(first, second);
+
+      bool inside(GlideRange zone, LatLng latlng) {
+        final g = zone.grid;
+        final m = metersBetween(g.origin, latlng);
+        final row = g.halfSize - (m.north / g.cellSize).round();
+        final col = g.halfSize + (m.east / g.cellSize).round();
+        return row >= 0 && col >= 0 && row < g.size && col < g.size && zone.isReachable(row, col);
+      }
+
+      int kept = 0, removed = 0;
+      final n = first.grid.size;
+      for (int row = 0; row < n; row++) {
+        for (int col = 0; col < n; col++) {
+          if (!first.isReachable(row, col)) continue;
+          final center = first.grid.cellCenter(row, col);
+          if (cut.isReachable(row, col)) {
+            kept++;
+            expect(inside(second, center), isFalse);
+          } else {
+            removed++;
+          }
+        }
+      }
+      expect(kept, greaterThan(0));
+      expect(removed, greaterThan(0));
+    });
+  });
+
   group("acro waypoint", () {
     test("found by name, any case", () {
       final wps = [
@@ -344,21 +459,38 @@ void main() {
   group("acro service", () {
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
+    test("an Acro waypoint turns purple and turns acro mode on", () async {
+      settingsMgr = SettingsMgr(await SharedPreferences.getInstance());
+      final plan = ActivePlan();
+      final service = AcroService(groundAt: (latlng) => null);
+      final other = Waypoint(name: "LZ", latlngs: [origin]);
+      plan.waypoints[other.id] = other;
+      service.onPlanChanged(plan);
+      await Future.delayed(Duration.zero);
+      expect(settingsMgr.acroMode.value, isFalse);
+
+      final acro = Waypoint(name: "acro", latlngs: [origin]);
+      plan.waypoints[acro.id] = acro;
+      service.onPlanChanged(plan);
+      await Future.delayed(Duration.zero);
+      expect(settingsMgr.acroMode.value, isTrue);
+      expect(acro.color, colorOptions["purple"]!.toARGB32());
+      expect(other.color, isNull);
+
+      // Turning it off sticks until another Acro waypoint shows up
+      settingsMgr.acroMode.value = false;
+      service.onPlanChanged(plan);
+      expect(settingsMgr.acroMode.value, isFalse);
+    });
+
     test("climbing turns fill the wind table, then predict landings", () {
       final service = AcroService(groundAt: (latlng) => 1000);
       final acroWp = Waypoint(name: "Acro", latlngs: [origin]);
-      Geo? prev;
       for (final f in climbingTurn(seconds: 120, startAlt: 1100)) {
         final geo =
             Geo(lat: origin.latitude, lng: origin.longitude, alt: f.alt, timestamp: f.time, hdg: f.hdg, spd: f.spd);
-        service.update(geo, prev,
-            vario: 1.5,
-            gForce: <TimestampValue<double>>[],
-            waypoints: [acroWp],
-            hardDeck: 300,
-            acroRate: 5,
-            reserveRates: [3]);
-        prev = geo;
+        service.update(geo,
+            gForce: <TimestampValue<double>>[], waypoints: [acroWp], hardDeck: 300, acroRate: 5, reserveRates: [3]);
       }
       expect(service.groundRefSource, AcroGroundRef.waypoint);
       expect(service.height, closeTo(280, 1));
@@ -372,26 +504,38 @@ void main() {
       expect(metersBetween(origin, p.landings.single.landAt).east, greaterThan(300));
     });
 
-    test("not climbing: nothing recorded", () {
+    test("level circles count too", () {
       final service = AcroService(groundAt: (latlng) => null);
-      Geo? prev;
       for (final f in climbingTurn(climb: 0)) {
         final geo =
             Geo(lat: origin.latitude, lng: origin.longitude, alt: f.alt, timestamp: f.time, hdg: f.hdg, spd: f.spd)
               ..ground = 1000;
-        service.update(geo, prev,
-            vario: 0,
-            gForce: <TimestampValue<double>>[],
-            waypoints: const [],
-            hardDeck: 300,
-            acroRate: 5,
-            reserveRates: [3]);
-        prev = geo;
+        service.update(geo,
+            gForce: <TimestampValue<double>>[], waypoints: const [], hardDeck: 300, acroRate: 5, reserveRates: [3]);
       }
       expect(service.groundRefSource, AcroGroundRef.here);
-      expect(service.table.isEmpty, isTrue);
+      expect(service.tableGate, isNull);
+      expect(service.table.bands.length, 1);
+      expect(service.table.bands.values.single.east, closeTo(4, 0.2));
+      expect(service.prediction, isNotNull);
+    });
+
+    test("acro is left out of the wind table", () {
+      final service = AcroService(groundAt: (latlng) => null);
+      final gForce = <TimestampValue<double>>[];
+      for (final f in climbingTurn(climb: -3)) {
+        // Pulling 2.5 g the whole time
+        for (int ms = 0; ms < 1000; ms += 100) {
+          gForce.add(TimestampValue(f.time - 1000 + ms, 2.5));
+        }
+        final geo =
+            Geo(lat: origin.latitude, lng: origin.longitude, alt: f.alt, timestamp: f.time, hdg: f.hdg, spd: f.spd)
+              ..ground = 1000;
+        service.update(geo, gForce: gForce, waypoints: const [], hardDeck: 300, acroRate: 5, reserveRates: [3]);
+      }
+      expect(service.runDetector.running, isTrue);
       expect(service.tableGate, isNotNull);
-      expect(service.prediction, isNull);
+      expect(service.table.isEmpty, isTrue);
     });
   });
 }

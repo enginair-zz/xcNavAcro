@@ -1,22 +1,46 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 
 import 'package:xcnav/models/acro.dart';
+import 'package:xcnav/models/glide_range.dart';
 import 'package:xcnav/providers/my_telemetry.dart';
 import 'package:xcnav/services/acro_service.dart';
+import 'package:xcnav/settings_service.dart';
 import 'package:xcnav/views/map/glide_range_layer.dart';
 
-/// Same look as the glide range, different colors.
-const acroZoneEdgeColor = Color(0xff00e5ff);
-const acroZoneInnerColor = Color(0xff2962ff);
+const int _fillAlpha = 90;
+const int _edgeAlpha = 230;
 
-/// Where the reserve would land if thrown between now and the hard deck.
+/// Reserve color for a landing, by which reserve it is.
+Color reserveColor(int reserve) =>
+    reserve == 0 ? settingsMgr.acroReserve1Color.value : settingsMgr.acroReserve2Color.value;
+
+/// RGBA pixels, one per grid cell, in one solid [color]: an even see-through fill with a stronger edge.
+Uint8List solidZonePixels(GlideRange zone, Color color) {
+  final n = zone.grid.size;
+  final dist = glideEdgeDistance(zone);
+  final pixels = Uint8List(n * n * 4);
+  for (int i = 0; i < n * n; i++) {
+    final d = dist[i];
+    if (d == 0) continue;
+    final alpha = d <= 1 ? _edgeAlpha : _fillAlpha;
+    // Raw pixels are premultiplied
+    pixels[i * 4] = (color.r * alpha).round();
+    pixels[i * 4 + 1] = (color.g * alpha).round();
+    pixels[i * 4 + 2] = (color.b * alpha).round();
+    pixels[i * 4 + 3] = alpha;
+  }
+  return pixels;
+}
+
+/// Where each reserve would land if thrown between now and the hard deck, in that reserve's color.
 ///
-/// The whole range is one band. The lowest third of the run is drawn again on top: that's where landing near the
-/// "Acro" waypoint matters most, since higher throws leave time to steer the reserve.
+/// Each reserve's whole range is one band. The lowest third of the run is drawn again on top, so it's more solid:
+/// that's where landing near the "Acro" waypoint matters most, since higher throws leave time to steer the reserve.
 class AcroReserveLayer extends StatefulWidget {
   const AcroReserveLayer({super.key});
 
@@ -32,23 +56,34 @@ class _ZoneImage {
 }
 
 class _AcroReserveLayerState extends State<AcroReserveLayer> {
-  _ZoneImage? all;
-  _ZoneImage? lowerThird;
+  /// Bottom to top
+  List<_ZoneImage> images = [];
   ReservePrediction? drawn;
 
   @override
   void initState() {
     super.initState();
     acroService.addListener(onPrediction);
+    settingsMgr.acroReserve1Color.listenable.addListener(onColor);
+    settingsMgr.acroReserve2Color.listenable.addListener(onColor);
     onPrediction();
   }
 
   @override
   void dispose() {
     acroService.removeListener(onPrediction);
-    all?.image.dispose();
-    lowerThird?.image.dispose();
+    settingsMgr.acroReserve1Color.listenable.removeListener(onColor);
+    settingsMgr.acroReserve2Color.listenable.removeListener(onColor);
+    for (final each in images) {
+      each.image.dispose();
+    }
     super.dispose();
+  }
+
+  /// Redraw the current zones in the new colors.
+  void onColor() {
+    drawn = null;
+    onPrediction();
   }
 
   void onPrediction() {
@@ -56,45 +91,68 @@ class _AcroReserveLayerState extends State<AcroReserveLayer> {
     if (prediction == drawn) return;
     drawn = prediction;
     if (prediction == null) {
-      setImages(null, null);
+      setImages([]);
       return;
     }
-    Future.wait([render(prediction.landings), render(prediction.lowerThird)]).then((images) {
+    // Whole range and lower third, per reserve
+    GlideRange? zoneOf(Iterable<ReserveLanding> landings, int reserve) {
+      final mine = landings.where((l) => l.reserve == reserve).toList();
+      return mine.isEmpty ? null : reserveZoneRange(mine);
+    }
+
+    final all = {
+      for (final r in [0, 1]) r: zoneOf(prediction.landings, r)
+    };
+    final lower = {
+      for (final r in [0, 1]) r: zoneOf(prediction.lowerThird, r)
+    };
+
+    // Reserve 1 is cut out wherever it overlaps reserve 2, so the two never cover each other
+    final second = all[1];
+    if (second != null) {
+      if (all[0] != null) all[0] = subtractZone(all[0]!, second);
+      if (lower[0] != null) lower[0] = subtractZone(lower[0]!, second);
+    }
+
+    final layers = <Future<_ZoneImage?>>[];
+    for (final reserve in [1, 0]) {
+      final color = reserveColor(reserve);
+      layers.add(render(all[reserve], color));
+      layers.add(render(lower[reserve], color));
+    }
+    Future.wait(layers).then((rendered) {
+      final done = rendered.nonNulls.toList();
       if (!mounted || drawn != prediction) {
-        for (final each in images) {
-          each?.image.dispose();
+        for (final each in done) {
+          each.image.dispose();
         }
         return;
       }
-      setImages(images[0], images[1]);
+      setImages(done);
     });
   }
 
-  Future<_ZoneImage?> render(List<ReserveLanding> landings) {
-    if (landings.isEmpty) return Future.value(null);
-    final zone = reserveZoneRange(landings);
+  Future<_ZoneImage?> render(GlideRange? zone, Color color) {
+    if (zone == null) return Future.value(null);
     final n = zone.grid.size;
-    final pixels = glideRangePixels(zone, edgeColor: acroZoneEdgeColor, innerColor: acroZoneInnerColor);
     final done = Completer<_ZoneImage?>();
-    ui.decodeImageFromPixels(
-        pixels, n, n, ui.PixelFormat.rgba8888, (decoded) => done.complete(_ZoneImage(decoded, zone.grid.bounds)));
+    ui.decodeImageFromPixels(solidZonePixels(zone, color), n, n, ui.PixelFormat.rgba8888,
+        (decoded) => done.complete(_ZoneImage(decoded, zone.grid.bounds)));
     return done.future;
   }
 
-  void setImages(_ZoneImage? newAll, _ZoneImage? newLowerThird) {
+  void setImages(List<_ZoneImage> newImages) {
     if (!mounted) {
-      newAll?.image.dispose();
-      newLowerThird?.image.dispose();
+      for (final each in newImages) {
+        each.image.dispose();
+      }
       return;
     }
-    final oldAll = all;
-    final oldLowerThird = lowerThird;
-    setState(() {
-      all = newAll;
-      lowerThird = newLowerThird;
-    });
-    oldAll?.image.dispose();
-    oldLowerThird?.image.dispose();
+    final old = images;
+    setState(() => images = newImages);
+    for (final each in old) {
+      each.image.dispose();
+    }
   }
 
   Widget imageLayer(MapCamera camera, _ZoneImage zone) {
@@ -113,14 +171,13 @@ class _AcroReserveLayerState extends State<AcroReserveLayer> {
     final camera = MapCamera.of(context);
     final startAt = drawn?.startAt;
     final me = myTelemetry.geo?.latlng;
+    final color = settingsMgr.acroReserve1Color.value;
+    final textColor = color.computeLuminance() > 0.4 ? Colors.black : Colors.white;
     return Stack(fit: StackFit.expand, children: [
-      if (all != null || lowerThird != null)
+      if (images.isNotEmpty)
         MobileLayerTransformer(
           child: ClipRect(
-            child: Stack(children: [
-              if (all != null) imageLayer(camera, all!),
-              if (lowerThird != null) imageLayer(camera, lowerThird!),
-            ]),
+            child: Stack(children: images.map((each) => imageLayer(camera, each)).toList()),
           ),
         ),
 
@@ -129,25 +186,43 @@ class _AcroReserveLayerState extends State<AcroReserveLayer> {
         PolylineLayer(polylines: [
           Polyline(
               points: [me, startAt],
-              color: acroZoneEdgeColor,
-              strokeWidth: 3,
-              pattern: StrokePattern.dashed(segments: const [12, 8])),
+              color: color,
+              strokeWidth: 4,
+              borderColor: Colors.black,
+              borderStrokeWidth: 1.5,
+              pattern: StrokePattern.dashed(segments: const [14, 8])),
         ]),
       if (startAt != null)
         MarkerLayer(markers: [
           Marker(
               point: startAt,
-              width: 90,
-              height: 56,
+              width: 110,
+              height: 88,
               rotate: true,
-              child: const Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.add_circle_outline, color: acroZoneEdgeColor, size: 32),
-                Text("Acro start",
-                    style: TextStyle(
-                        color: acroZoneEdgeColor,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                        shadows: [Shadow(blurRadius: 4, color: Colors.black)])),
+              // Target centered on the point (and the end of the dashed line), label hanging below it
+              child: Stack(alignment: Alignment.center, children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 3),
+                      boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black)]),
+                  child: Icon(Icons.gps_fixed, size: 18, color: textColor),
+                ),
+                Positioned(
+                  top: 44 + 16,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.black, width: 1.5)),
+                    child: Text("ACRO START",
+                        style: TextStyle(color: textColor, fontSize: 13, fontWeight: FontWeight.w900)),
+                  ),
+                ),
               ])),
         ]),
     ]);

@@ -25,7 +25,7 @@
     
     
     <application
-        android:label="xcnav"
+        android:label="${appLabel}"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

@@ -223,6 +223,9 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
 
     assert(globalContext != null, "globalContext in MyTelemetry instance hasn't been set yet!");
 
+    settingsMgr.gpsUpdateInterval.listenable.removeListener(_restartGpsService);
+    settingsMgr.gpsUpdateInterval.listenable.addListener(_restartGpsService);
+
     if (flightEvent.hasListener) {
       flightEvent.close();
       flightEvent = StreamController<FlightEvent>();
@@ -521,6 +524,14 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     }
   }
 
+  /// Apply a new GPS update interval right away, if GPS is running.
+  void _restartGpsService() {
+    if (_positionStreamSubscription != null && globalContext != null) {
+      _stopGpsService();
+      _startGpsService(globalContext!);
+    }
+  }
+
   void _stopGpsService() {
     if (_positionStreamSubscription != null) {
       _positionStreamSubscription?.cancel();
@@ -571,8 +582,10 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
         }
 
         if (settingsMgr.acroMode.value) {
-          acroService.handleGeo(context, geo!, geoPrev,
-              vario: varioSmooth.value, gForce: gForceRecord, launchAlt: inFlight ? launchGeo?.alt : null);
+          acroService.handleGeo(context, geo!,
+              gForce: gForceRecord, launchAlt: inFlight ? launchGeo?.alt : null, inFlight: inFlight);
+        } else {
+          acroService.stopGyro();
         }
 
         // Update ADSB

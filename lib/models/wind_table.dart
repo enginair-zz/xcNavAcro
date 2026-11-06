@@ -105,14 +105,26 @@ class WindEstimate {
   /// m/s
   final double airspeed;
 
-  /// Meters MSL
+  /// Meters MSL: middle of the turn
   final double alt;
+
+  /// Meters MSL: lowest and highest points of the turn. Default to [alt].
+  final double minAlt;
+  final double maxAlt;
 
   /// Milliseconds since epoch
   final int time;
 
   const WindEstimate(
-      {required this.east, required this.north, required this.airspeed, required this.alt, required this.time});
+      {required this.east,
+      required this.north,
+      required this.airspeed,
+      required this.alt,
+      double? minAlt,
+      double? maxAlt,
+      required this.time})
+      : minAlt = minAlt ?? alt,
+        maxAlt = maxAlt ?? alt;
 
   double get speed => sqrt(east * east + north * north);
 }
@@ -176,6 +188,8 @@ class QuarterTurnWindFitter {
         _samples.map((s) => s.spd * sin(s.hdg)).toList(), _samples.map((s) => s.spd * cos(s.hdg)).toList());
     final count = _samples.length;
     final meanAlt = _samples.map((s) => s.alt).reduce((a, b) => a + b) / count;
+    final minAlt = _samples.map((s) => s.alt).reduce(min);
+    final maxAlt = _samples.map((s) => s.alt).reduce(max);
 
     // Start the next fit from here either way. A bad fit means the samples weren't a steady turn.
     final last = _samples.last;
@@ -186,7 +200,8 @@ class QuarterTurnWindFitter {
     if (fit == null || fit.r < minAirspeed || fit.r > maxAirspeed) return null;
     if (sqrt(fit.cx * fit.cx + fit.cy * fit.cy) >= fit.r * 0.9) return null;
     if (fit.rms > fit.r * maxRelRms) return null;
-    return WindEstimate(east: fit.cx, north: fit.cy, airspeed: fit.r, alt: meanAlt, time: time);
+    return WindEstimate(
+        east: fit.cx, north: fit.cy, airspeed: fit.r, alt: meanAlt, minAlt: minAlt, maxAlt: maxAlt, time: time);
   }
 }
 
@@ -241,13 +256,15 @@ class WindTable {
   /// Middle of a band (meters MSL)
   static double bandCenter(int band) => (band + 0.5) * windBandHeight;
 
+  /// Add to every band the turn passed through.
   void add(WindEstimate est) {
-    final band = bandFor(est.alt);
-    final existing = bands[band];
-    if (existing == null) {
-      bands[band] = WindBand(east: est.east, north: est.north, airspeed: est.airspeed, updated: est.time);
-    } else {
-      existing.add(est);
+    for (int band = bandFor(est.minAlt); band <= bandFor(est.maxAlt); band++) {
+      final existing = bands[band];
+      if (existing == null) {
+        bands[band] = WindBand(east: est.east, north: est.north, airspeed: est.airspeed, updated: est.time);
+      } else {
+        existing.add(est);
+      }
     }
   }
 
@@ -311,13 +328,15 @@ WindVector? drift(WindAt windAt, {required double from, required double to, requ
 
 /// Why the wind table isn't recording right now, or null when it is.
 ///
-/// Only a sustained powered climb is used: acro, the engine-off glide, and taxiing all spoil the fit.
-/// [height] is meters above the ground, [vario] and [varioNow] are smoothed and instantaneous climb rates (m/s), and
-/// [maxG] is the most g pulled in the last couple seconds.
-String? windTableGate({required double? height, required double vario, required double? varioNow, double? maxG}) {
+/// Any normal flight is used (climb, level, glide); acro and taxiing are left out. Turns that aren't steady circles
+/// are dropped by the fit itself. [height] is meters above the ground. [minG], [maxG] and [maxRotation] (degrees per
+/// second) are the extremes over the last couple seconds.
+String? windTableGate(
+    {required double? height, required bool acroRun, double? minG, double? maxG, double? maxRotation}) {
   if (height == null) return "No ground elevation";
   if (height < 30.48) return "Below 100 ft";
-  if (vario < 0.762 || (varioNow != null && varioNow < 0.762)) return "Not climbing 150 ft/min";
-  if (maxG != null && maxG >= 1.3) return "Pulling g";
+  if (acroRun) return "Acro run";
+  if ((maxG != null && maxG >= 1.3) || (minG != null && minG < 0.7)) return "Pulling or unloading g";
+  if (maxRotation != null && maxRotation >= 60) return "Rotating fast";
   return null;
 }

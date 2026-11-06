@@ -11,6 +11,7 @@ import 'package:xcnav/models/glide_range.dart';
 
 import 'package:xcnav/providers/adsb.dart';
 import 'package:xcnav/units.dart';
+import 'package:xcnav/widgets/acro_mode_icon.dart';
 import 'package:xcnav/widgets/altimeter.dart';
 
 /// Holds and stores an individual setting.
@@ -286,6 +287,8 @@ class SettingsMgr {
   late final SettingConfig<double> acroReserve2Rate;
   late final SettingConfig<double> acroDescentRate;
   late final SettingConfig<int> acroDescentRuns;
+  late final SettingConfig<Color> acroReserve1Color;
+  late final SettingConfig<Color> acroReserve2Color;
 
   // --- Debug Tools
   late final SettingConfig<bool> spoofLocation;
@@ -470,8 +473,12 @@ class SettingsMgr {
 
     acroMode = SettingConfig(this, prefs, "Experimental", "acroMode", false,
         title: "acro_mode",
-        icon: const Icon(Icons.loop),
+        icon: const AcroModeIcon(),
         description: "Wind table, learned acro descent rate, and reserve landing spots around the \"Acro\" waypoint.");
+    // The wind table's turn fits need frequent GPS fixes
+    acroMode.listenable.addListener(() {
+      if (acroMode.value) gpsUpdateInterval.value = 1000;
+    });
 
     // --- Acro (edited in acro mode dialog). Meters and m/s.
     acroHardDeck = SettingConfig(this, prefs, "Acro", "acroHardDeck", 304.8,
@@ -484,6 +491,10 @@ class SettingsMgr {
         title: "Acro Descent Rate", hidden: true, setter: (value) => value.clamp(0.5, 40.0));
     acroDescentRuns = SettingConfig(this, prefs, "Acro", "acroDescentRuns", 0,
         title: "Acro Descent Rate Runs", hidden: true, setter: (value) => value < 0 ? 0 : value);
+    acroReserve1Color = SettingConfig(this, prefs, "Acro", "acroReserve1Color", const Color(0xffffb429),
+        title: "Acro Reserve 1 Color", hidden: true);
+    acroReserve2Color = SettingConfig(this, prefs, "Acro", "acroReserve2Color", const Color(0xffff003c),
+        title: "Acro Reserve 2 Color", hidden: true);
 
     // --- Launch / Landing detection (edited in flight detection dialog)
     const launchDefaults = LaunchDetectorConfig();
