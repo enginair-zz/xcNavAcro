@@ -70,8 +70,8 @@ class _ViewWindTableState extends State<ViewWindTable> {
         child: Row(children: [Expanded(child: Text(label, style: _dim)), Text(value)]),
       );
 
-  Widget _windArrow(double towardHdg, {Color? color}) => Transform.rotate(
-      angle: towardHdg, child: Icon(Icons.arrow_upward, size: 18, color: color ?? Colors.lightBlueAccent));
+  Widget _windArrow(double towardHdg) => Transform.rotate(
+      angle: towardHdg, child: const Icon(Icons.arrow_upward, size: 18, color: Colors.lightBlueAccent));
 
   Widget _table(AcroService acro) {
     final ref = acro.groundRef;
@@ -84,9 +84,6 @@ class _ViewWindTableState extends State<ViewWindTable> {
       );
     }
     final current = acro.height == null || ref == null ? null : WindTable.bandFor(acro.height! + ref);
-    // Every 100 ft layer from the ground (or the lowest reading) up to the highest reading or the pilot
-    final top = max(keys.first, current ?? keys.first);
-    final bottom = ref == null ? keys.last : min(keys.last, WindTable.bandFor(ref));
     const header = TextStyle(color: Colors.grey, fontSize: 12);
     return Table(
       columnWidths: const {
@@ -100,35 +97,30 @@ class _ViewWindTableState extends State<ViewWindTable> {
       defaultVerticalAlignment: TableCellVerticalAlignment.middle,
       children: [
         TableRow(children: [
-          Text(ref == null ? "MSL" : "Height", style: header),
+          const Text("MSL", style: header),
           const Text("From", style: header),
           const Text("Wind", style: header),
           const Text("Air", style: header),
           const Text("Fits", style: header),
           const Text("Age", style: header),
         ]),
-        for (int key = top; key >= bottom; key--)
+        // Measured layers only, highest first
+        for (final key in keys)
           () {
-            final band = acro.table.bands[key];
-            final alt = WindTable.bandCenter(key) - (ref ?? 0);
-            // Layers without their own reading show the interpolated wind the predictions use
-            final wind =
-                band == null ? acro.table.windAt(WindTable.bandCenter(key)) : (east: band.east, north: band.north);
-            final speed = wind == null ? 0.0 : sqrt(wind.east * wind.east + wind.north * wind.north);
-            final fromHdg = wind == null ? 0.0 : (atan2(-wind.east, -wind.north) + 2 * pi) % (2 * pi);
-            final style = TextStyle(
-                color: key == current ? Colors.amber : (band == null ? Colors.grey.shade600 : null),
-                fontStyle: band == null ? FontStyle.italic : null);
+            final band = acro.table.bands[key]!;
+            final style = TextStyle(color: key == current ? Colors.amber : null);
             return TableRow(children: [
-              Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(_dist(alt), style: style)),
+              Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(_dist(WindTable.bandCenter(key)), style: style)),
               Row(children: [
-                _windArrow(fromHdg + pi, color: band == null ? Colors.grey.shade600 : null),
-                Text(" ${(fromHdg * 180 / pi).round().toString().padLeft(3, "0")}°", style: style),
+                _windArrow(band.fromHdg + pi),
+                Text(" ${(band.fromHdg * 180 / pi).round().toString().padLeft(3, "0")}°", style: style),
               ]),
-              Text(_speed(speed), style: style),
-              Text(band == null ? "-" : _speed(band.airspeed), style: style),
-              Text(band == null ? "-" : "${band.count}", style: style),
-              Text(band == null ? "" : _age(band.updated), style: style),
+              Text(_speed(band.speed), style: style),
+              Text(_speed(band.airspeed), style: style),
+              Text("${band.count}", style: style),
+              Text(_age(band.updated), style: style),
             ]);
           }(),
       ],
@@ -158,8 +150,8 @@ class _ViewWindTableState extends State<ViewWindTable> {
                 [
                   _row("Recording", acro.tableGate == null ? "Yes" : "No: ${acro.tableGate}"),
                   _row("Turn so far",
-                      "${acro.fitter.sampleCount} fixes, ${(acro.fitter.span * 180 / pi).round()}° of 90°"),
-                  _row("Heights above", refName),
+                      "${acro.fitter.sampleCount} fixes, track swung ${(acro.fitter.span * 180 / pi).round()}°"),
+                  _row("Height & hard deck from", refName),
                   if (liveWind != null)
                     _row("Live wind (xcNav)",
                         "${((liveWind.windHdg * 180 / pi + 180) % 360).round()}° at ${_speed(liveWind.windSpd)}"),

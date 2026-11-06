@@ -147,17 +147,30 @@ class _TurnSample {
 ///
 /// Ground speed vectors around a turn lie on a circle: the center is the wind, the radius the airspeed. Samples are
 /// used once: after a fit the next one starts fresh, so each band gets independent estimates.
+///
+/// The turn is measured through the air (around the fitted wind), not by ground track: downwind the ground track
+/// swings slower than the wing turns, upwind faster.
 class QuarterTurnWindFitter {
-  /// Heading change needed for a fit
+  /// Turn through the air needed for a fit
   static const double minSpan = pi / 2;
+
+  /// Ground track swing before trying a fit. Downwind, a quarter turn through the air swings the ground track less.
+  static const double minGroundSpan = pi / 3;
   static const int minSamples = 5;
 
   /// A quarter turn shorter than this is a snap turn, not a steady one.
   static const int minDurationMs = 6000;
   static const int maxAgeMs = 60000;
 
-  /// Samples more than this far below the newest one are dropped (meters). 150 ft.
-  static const double maxAltSpan = 45.72;
+  /// Strongest paramotor climb (m/s): 1000 ft/min.
+  static const double maxClimb = 1000 / 196.85;
+
+  /// Slowest quarter turn to allow for (ms).
+  static const int slowQuarterTurnMs = 20000;
+
+  /// Samples more than this far below the newest one are dropped (meters): a slow quarter turn at the strongest
+  /// climb still fits. About 330 ft.
+  static const double maxAltSpan = maxClimb * slowQuarterTurnMs / 1000;
 
   static const double minAirspeed = 3;
   static const double maxAirspeed = 30;
@@ -169,7 +182,7 @@ class QuarterTurnWindFitter {
 
   int get sampleCount => _samples.length;
 
-  /// Heading change covered by the current samples (radians)
+  /// Ground track swing covered by the current samples (radians)
   double get span => headingSpan(_samples.map((s) => s.hdg));
 
   void reset() => _samples.clear();
@@ -182,10 +195,16 @@ class QuarterTurnWindFitter {
 
     if (_samples.length < minSamples) return null;
     if (time - _samples.first.time < minDurationMs) return null;
-    if (span < minSpan) return null;
+    if (span < minGroundSpan) return null;
 
-    final fit = fitCircleTaubin(
-        _samples.map((s) => s.spd * sin(s.hdg)).toList(), _samples.map((s) => s.spd * cos(s.hdg)).toList());
+    final xs = _samples.map((s) => s.spd * sin(s.hdg)).toList();
+    final ys = _samples.map((s) => s.spd * cos(s.hdg)).toList();
+    final fit = fitCircleTaubin(xs, ys);
+    // Keep collecting until the wing has turned a quarter turn through the air
+    if (fit != null &&
+        headingSpan([for (int i = 0; i < xs.length; i++) atan2(xs[i] - fit.cx, ys[i] - fit.cy)]) < minSpan) {
+      return null;
+    }
     final count = _samples.length;
     final meanAlt = _samples.map((s) => s.alt).reduce((a, b) => a + b) / count;
     final minAlt = _samples.map((s) => s.alt).reduce(min);

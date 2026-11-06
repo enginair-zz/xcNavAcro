@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:xcnav/fake_path.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xcnav/models/acro.dart';
 import 'package:xcnav/models/geo.dart';
@@ -89,6 +90,16 @@ void main() {
         expect(est.north, closeTo(0, 0.1));
         expect(est.airspeed, closeTo(12, 0.1));
       }
+    });
+
+    test("a slow turn in a 1000 ft/min climb still fits", () {
+      final fitter = QuarterTurnWindFitter();
+      int fits = 0;
+      // 90° every 20 s, climbing 1000 ft/min
+      for (final f in climbingTurn(degPerSec: 4.5, climb: 1000 / 196.85, seconds: 120)) {
+        if (fitter.add(time: f.time, alt: f.alt, hdg: f.hdg, spd: f.spd) != null) fits++;
+      }
+      expect(fits, greaterThanOrEqualTo(4));
     });
 
     test("snap turns don't count", () {
@@ -502,6 +513,31 @@ void main() {
       final p = service.prediction!;
       expect(p.landings.length, 1);
       expect(metersBetween(origin, p.landings.single.landAt).east, greaterThan(300));
+    });
+
+    test("the spoofed test flight circling a selected waypoint fills the wind table", () {
+      final service = AcroService(groundAt: (latlng) => null);
+      final fake = FakeFlight()..initFakeFlight(Geo(lat: origin.latitude, lng: origin.longitude, alt: 300));
+      // Waypoint just ahead; climbing toward a high target altitude the whole time
+      final target = offsetMeters(origin, 0, 300);
+      // Fixes 3 s apart, like the app's spoofing timer
+      Geo prev = Geo(lat: origin.latitude, lng: origin.longitude, alt: 300, timestamp: 0);
+      for (int step = 1; step <= 200; step++) {
+        final pos = fake.genFakeLocationFlight(target, prev, targetAlt: 5000);
+        final here = LatLng(pos.latitude, pos.longitude);
+        final geo = Geo(
+            lat: pos.latitude,
+            lng: pos.longitude,
+            alt: pos.altitude,
+            timestamp: step * 3000,
+            hdg: latlngCalc.bearing(prev.latlng, here) * pi / 180,
+            spd: latlngCalc.distance(prev.latlng, here) / 3)
+          ..ground = 0;
+        service.update(geo,
+            gForce: <TimestampValue<double>>[], waypoints: const [], hardDeck: 300, acroRate: 5, reserveRates: [3]);
+        prev = geo;
+      }
+      expect(service.table.bands.length, greaterThanOrEqualTo(3));
     });
 
     test("level circles count too", () {
