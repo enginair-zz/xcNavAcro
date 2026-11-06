@@ -53,3 +53,4 @@ app.*.map.json
 /lib/objectbox.dll
 /lib/libobjectbox.so
 /lib/libobjectbox.dylib
+/android/build/
