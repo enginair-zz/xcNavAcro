@@ -104,6 +104,49 @@ void main() {
       expect(fits, greaterThanOrEqualTo(4));
     });
 
+    test("holds the airspeed once fits agree, scaled for thinner air", () {
+      final fitter = QuarterTurnWindFitter();
+      expect(fitter.airspeed, isNull);
+      for (final f in climbingTurn(climb: 0)) {
+        fitter.add(time: f.time, alt: f.alt, hdg: f.hdg, spd: f.spd);
+      }
+      // 12 m/s true airspeed at 1600 m is less at sea level
+      expect(fitter.airspeed, closeTo(12 * sqrt(densityRatio(1600)), 0.05));
+      fitter.reset();
+      expect(fitter.airspeed, isNotNull);
+      fitter.clear();
+      expect(fitter.airspeed, isNull);
+    });
+
+    test("a short noisy arc finds the wind better with the airspeed held", () {
+      // 70° of a turn, wind 4 m/s east, airspeed 12, ground speed off by up to 0.6 m/s
+      final xs = <double>[], ys = <double>[];
+      for (int i = 0; i <= 7; i++) {
+        final a = i * 10 * pi / 180;
+        final noise = (i % 3 - 1) * 0.6;
+        xs.add(4 + (12 + noise) * sin(a));
+        ys.add((12 + noise) * cos(a));
+      }
+      final free = fitCircleTaubin(xs, ys)!;
+      final held = fitCircleFixedRadius(xs, ys, 12, [(free.cx, free.cy)])!;
+      final freeErr = sqrt(pow(free.cx - 4, 2) + pow(free.cy, 2));
+      final heldErr = sqrt(pow(held.cx - 4, 2) + pow(held.cy, 2));
+      expect(heldErr, lessThan(0.5));
+      expect(heldErr, lessThan(freeErr));
+    });
+
+    test("moves to a new airspeed when several fits agree on it", () {
+      final fitter = QuarterTurnWindFitter();
+      for (final f in climbingTurn(climb: 0)) {
+        fitter.add(time: f.time, alt: f.alt, hdg: f.hdg, spd: f.spd);
+      }
+      // Other wing: 16 m/s
+      for (final f in climbingTurn(climb: 0, airspeed: 16, start: 100000)) {
+        fitter.add(time: f.time, alt: f.alt, hdg: f.hdg, spd: f.spd);
+      }
+      expect(fitter.airspeed, closeTo(16 * sqrt(densityRatio(1600)), 0.05));
+    });
+
     test("snap turns don't count", () {
       final fitter = QuarterTurnWindFitter();
       // 90° in 3 s

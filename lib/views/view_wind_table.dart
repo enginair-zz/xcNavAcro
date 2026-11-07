@@ -153,6 +153,13 @@ class _ViewWindTableState extends State<ViewWindTable> {
                   _row("Recording", acro.tableGate == null ? "Yes" : "No: ${acro.tableGate}"),
                   _row("Turn so far",
                       "${acro.fitter.sampleCount} fixes, track swung ${(acro.fitter.span * 180 / pi).round()}°"),
+                  _row(
+                      "Airspeed held",
+                      acro.fitter.airspeed == null
+                          ? "not yet (${QuarterTurnWindFitter.minAirspeedFits} fits)"
+                          : acro.height == null || acro.groundRef == null
+                              ? "${_speed(acro.fitter.airspeed!)} at sea level"
+                              : _speed(acro.fitter.airspeed! / sqrt(densityRatio(acro.height! + acro.groundRef!)))),
                   _row("Height & hard deck from", refName),
                   if (liveWind != null)
                     _row("Live wind (xcNav)",

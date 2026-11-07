@@ -154,7 +154,7 @@ class AcroService with ChangeNotifier {
 
   void clearTable() {
     table.clear();
-    fitter.reset();
+    fitter.clear();
     lastEstimate = null;
     _scheduleSave();
     notifyListeners();

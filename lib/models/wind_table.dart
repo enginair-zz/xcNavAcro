@@ -86,6 +86,46 @@ CircleFit? fitCircleTaubin(List<double> xs, List<double> ys) {
   return CircleFit(cx + xMean, cy + yMean, r, sqrt(sumSq / n));
 }
 
+/// Circle of known radius [r] through the points: only the center is fitted (Gauss-Newton from each of [starts]).
+/// Far steadier than a free fit over a short arc, where center and radius trade off against each other.
+CircleFit? fitCircleFixedRadius(List<double> xs, List<double> ys, double r, List<(double, double)> starts) {
+  final n = xs.length;
+  if (n < 2 || ys.length != n) return null;
+  CircleFit? best;
+  for (var (cx, cy) in starts) {
+    for (int iter = 0; iter < 30; iter++) {
+      double a = 0, b = 0, c = 0, bx = 0, by = 0;
+      for (int i = 0; i < n; i++) {
+        final dx = xs[i] - cx, dy = ys[i] - cy;
+        final d = max(sqrt(dx * dx + dy * dy), 1e-9);
+        final ux = dx / d, uy = dy / d;
+        a += ux * ux;
+        b += ux * uy;
+        c += uy * uy;
+        bx += ux * (d - r);
+        by += uy * (d - r);
+      }
+      final det = a * c - b * b;
+      if (det.abs() < 1e-12) break;
+      final sx = (c * bx - b * by) / det, sy = (a * by - b * bx) / det;
+      cx += sx;
+      cy += sy;
+      if (sqrt(sx * sx + sy * sy) < 1e-4) break;
+    }
+    double sumSq = 0;
+    for (int i = 0; i < n; i++) {
+      final d = sqrt(pow(xs[i] - cx, 2) + pow(ys[i] - cy, 2)) - r;
+      sumSq += d * d;
+    }
+    final fit = CircleFit(cx, cy, r, sqrt(sumSq / n));
+    if (fit.rms.isFinite && (best == null || fit.rms < best.rms)) best = fit;
+  }
+  return best;
+}
+
+/// Air density relative to sea level (standard atmosphere) at [alt] meters MSL.
+double densityRatio(double alt) => pow(1 - 2.25577e-5 * alt, 4.2559).toDouble();
+
 /// Smallest arc (radians) that holds all [headings]. Handles the wrap at north.
 double headingSpan(Iterable<double> headings) {
   final angles = headings.map((h) => h % (2 * pi)).toList()..sort();
@@ -150,6 +190,11 @@ class _TurnSample {
 ///
 /// The turn is measured through the air (around the fitted wind), not by ground track: downwind the ground track
 /// swings slower than the wing turns, upwind faster.
+///
+/// On full power with hands off the brakes the airspeed hardly changes, so once [minAirspeedFits] fits agree on it,
+/// it's held ([airspeed]) and later turns only fit the wind. The held airspeed is kept at sea level and scaled for
+/// thinner air higher up. It follows fits within [airspeedTolerance] of it, and moves to a new value once
+/// [minAirspeedFits] fits in a row agree on one (other wing or trim).
 class QuarterTurnWindFitter {
   /// Turn through the air needed for a fit
   static const double minSpan = pi / 2;
@@ -178,14 +223,59 @@ class QuarterTurnWindFitter {
   /// Max RMS fit error, as a fraction of airspeed
   static const double maxRelRms = 0.15;
 
+  static const int minAirspeedFits = 3;
+  static const double airspeedTolerance = 0.15;
+
   final List<_TurnSample> _samples = [];
+
+  /// Sea-level airspeeds (m/s) of recent free fits that agreed with the held airspeed, and of ones that didn't
+  final List<double> _airspeeds = [];
+  final List<double> _outliers = [];
 
   int get sampleCount => _samples.length;
 
   /// Ground track swing covered by the current samples (radians)
   double get span => headingSpan(_samples.map((s) => s.hdg));
 
+  /// Held airspeed (m/s at sea level), once [minAirspeedFits] fits agree
+  double? get airspeed => _airspeeds.length < minAirspeedFits ? null : _median(_airspeeds);
+
+  static double _median(List<double> values) {
+    final sorted = [...values]..sort();
+    return sorted[sorted.length ~/ 2];
+  }
+
+  /// Start the next turn fresh. The held airspeed stays.
   void reset() => _samples.clear();
+
+  /// Forget the held airspeed too
+  void clear() {
+    _samples.clear();
+    _airspeeds.clear();
+    _outliers.clear();
+  }
+
+  /// Track the held airspeed from a free fit's (sea-level) airspeed
+  void _learnAirspeed(double seaLevel) {
+    final held = airspeed;
+    if (held == null || (seaLevel / held - 1).abs() <= airspeedTolerance) {
+      _airspeeds.add(seaLevel);
+      if (_airspeeds.length > 9) _airspeeds.removeAt(0);
+      _outliers.clear();
+      return;
+    }
+    _outliers.add(seaLevel);
+    if (_outliers.length < minAirspeedFits) return;
+    final median = _median(_outliers);
+    if (_outliers.every((a) => (a / median - 1).abs() <= airspeedTolerance)) {
+      _airspeeds
+        ..clear()
+        ..addAll(_outliers);
+      _outliers.clear();
+    } else {
+      _outliers.removeAt(0);
+    }
+  }
 
   /// Add a GPS sample taken during a steady climb. Returns an estimate when the samples cover enough of a turn.
   WindEstimate? add({required int time, required double alt, required double hdg, required double spd}) {
@@ -216,11 +306,29 @@ class QuarterTurnWindFitter {
       ..clear()
       ..add(last);
 
-    if (fit == null || fit.r < minAirspeed || fit.r > maxAirspeed) return null;
-    if (sqrt(fit.cx * fit.cx + fit.cy * fit.cy) >= fit.r * 0.9) return null;
-    if (fit.rms > fit.r * maxRelRms) return null;
+    final freeOk = fit != null &&
+        fit.r >= minAirspeed &&
+        fit.r <= maxAirspeed &&
+        sqrt(fit.cx * fit.cx + fit.cy * fit.cy) < fit.r * 0.9 &&
+        fit.rms <= fit.r * maxRelRms;
+    final held = airspeed;
+    if (freeOk) _learnAirspeed(fit.r * sqrt(densityRatio(meanAlt)));
+    if (held == null) {
+      return freeOk
+          ? WindEstimate(
+              east: fit.cx, north: fit.cy, airspeed: fit.r, alt: meanAlt, minAlt: minAlt, maxAlt: maxAlt, time: time)
+          : null;
+    }
+
+    // Airspeed known: fit only the wind
+    final r = held / sqrt(densityRatio(meanAlt));
+    final meanX = xs.reduce((a, b) => a + b) / count, meanY = ys.reduce((a, b) => a + b) / count;
+    final fixed = fitCircleFixedRadius(xs, ys, r, [if (fit != null) (fit.cx, fit.cy), (meanX, meanY)]);
+    if (fixed == null) return null;
+    if (sqrt(fixed.cx * fixed.cx + fixed.cy * fixed.cy) >= r * 0.9) return null;
+    if (fixed.rms > r * maxRelRms) return null;
     return WindEstimate(
-        east: fit.cx, north: fit.cy, airspeed: fit.r, alt: meanAlt, minAlt: minAlt, maxAlt: maxAlt, time: time);
+        east: fixed.cx, north: fixed.cy, airspeed: r, alt: meanAlt, minAlt: minAlt, maxAlt: maxAlt, time: time);
   }
 }
 

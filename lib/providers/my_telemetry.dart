@@ -16,6 +16,7 @@ import 'package:provider/provider.dart';
 import 'package:xcnav/audio_cue_service.dart';
 import 'package:xcnav/dem_service.dart';
 import 'package:xcnav/douglas_peucker.dart';
+import 'package:xcnav/log_replay.dart';
 import 'package:xcnav/fake_path.dart';
 import 'package:xcnav/gaussian_filter.dart';
 import 'package:xcnav/log_store.dart';
@@ -317,6 +318,7 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     });
 
     isInitialized = true;
+    startLogReplay(globalContext!, this);
   }
 
   void _startBaroService() {
