@@ -29,6 +29,10 @@ class _ViewWindTableState extends State<ViewWindTable> {
 
   String _dist(double meters) =>
       "${printValue(UnitType.distFine, meters, decimals: 0)} ${getUnitStr(UnitType.distFine)}";
+
+  /// A band as "1000-1500 ft" MSL
+  String _range(int band) =>
+      "${printValue(UnitType.distFine, WindTable.bandBottom(band), decimals: 0)}-${_dist(WindTable.bandBottom(band + 1))}";
   String _coarse(double meters) =>
       "${printValue(UnitType.distCoarse, meters, decimals: 2)} ${getUnitStr(UnitType.distCoarse)}";
   String _speed(double mps) => "${printValue(UnitType.speed, mps, decimals: 0)} ${getUnitStr(UnitType.speed)}";
@@ -79,15 +83,15 @@ class _ViewWindTableState extends State<ViewWindTable> {
     if (keys.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(8),
-        child:
-            Text("Empty. Fills in from GPS whenever you circle (not during acro), one band per 100 ft.", style: _dim),
+        child: Text("Empty. Fills in from GPS whenever you circle (not during acro), one band per 500 ft MSL.",
+            style: _dim),
       );
     }
     final current = acro.height == null || ref == null ? null : WindTable.bandFor(acro.height! + ref);
     const header = TextStyle(color: Colors.grey, fontSize: 12);
     return Table(
       columnWidths: const {
-        0: FlexColumnWidth(1.3),
+        0: FlexColumnWidth(1.9),
         1: FlexColumnWidth(1.4),
         2: FlexColumnWidth(1.1),
         3: FlexColumnWidth(1.1),
@@ -110,9 +114,7 @@ class _ViewWindTableState extends State<ViewWindTable> {
             final band = acro.table.bands[key]!;
             final style = TextStyle(color: key == current ? Colors.amber : null);
             return TableRow(children: [
-              Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text(_dist(WindTable.bandCenter(key)), style: style)),
+              Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Text(_range(key), style: style)),
               Row(children: [
                 _windArrow(band.fromHdg + pi),
                 Text(" ${(band.fromHdg * 180 / pi).round().toString().padLeft(3, "0")}°", style: style),

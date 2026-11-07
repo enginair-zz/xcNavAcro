@@ -102,7 +102,8 @@ class AcroService with ChangeNotifier {
   }
 
   Timer? _saveTimer;
-  static const _prefsKey = "acro.windTable";
+  // Changed with the band height (100 ft -> 500 ft) so old band numbers are not misread
+  static const _prefsKey = "acro.windTable500";
 
   Future<void> load() async {
     if (_loaded) return;

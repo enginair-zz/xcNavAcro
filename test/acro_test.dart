@@ -146,7 +146,7 @@ void main() {
 
     test("a turn fills every band it passed through", () {
       final table = WindTable()
-        ..add(const WindEstimate(east: 3, north: 0, airspeed: 12, alt: 60, minAlt: 20, maxAlt: 95, time: 0));
+        ..add(const WindEstimate(east: 3, north: 0, airspeed: 12, alt: 280, minAlt: 100, maxAlt: 470, time: 0));
       expect(table.bands.keys.toList()..sort(), [0, 1, 2, 3]);
     });
 
@@ -505,7 +505,7 @@ void main() {
       }
       expect(service.groundRefSource, AcroGroundRef.waypoint);
       expect(service.height, closeTo(280, 1));
-      expect(service.table.bands.length, greaterThanOrEqualTo(4));
+      expect(service.table.bands.length, greaterThanOrEqualTo(2));
       for (final band in service.table.bands.values) {
         expect(band.east, closeTo(4, 0.2));
       }

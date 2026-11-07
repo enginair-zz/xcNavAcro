@@ -6,8 +6,8 @@ typedef WindVector = ({double east, double north});
 /// Wind at an altitude (meters), or null when nothing is known.
 typedef WindAt = WindVector? Function(double alt);
 
-/// Height of each wind table band (meters). 100 ft.
-const double windBandHeight = 30.48;
+/// Height of each wind table band (meters). 500 ft, counted up from 0 ft MSL.
+const double windBandHeight = 152.4;
 
 /// Wind table entries older than this are dropped.
 const Duration windTableMaxAge = Duration(hours: 3);
@@ -271,6 +271,9 @@ class WindTable {
   bool get isEmpty => bands.isEmpty;
 
   static int bandFor(double alt) => (alt / windBandHeight).floor();
+
+  /// Bottom of a band (meters MSL)
+  static double bandBottom(int band) => band * windBandHeight;
 
   /// Middle of a band (meters MSL)
   static double bandCenter(int band) => (band + 0.5) * windBandHeight;
