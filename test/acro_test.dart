@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -194,11 +196,11 @@ void main() {
   });
 
   group("acro runs", () {
-    /// Acro from 1000 m down at 5 m/s, pulling 2 g, with g samples at 10 Hz.
+    /// Acro from 1000 m down at 5 m/s, pulling 2.5 g, with g samples at 10 Hz.
     AcroRun? fly(AcroRunDetector detector, {required double hardDeck, int seconds = 200, double ground = 0}) {
       for (int t = 0; t <= seconds * 10; t++) {
         final time = 10000 + t * 100;
-        detector.addG(time, t < 5 ? 1.0 : 2.0);
+        detector.addG(time, t < 5 ? 1.0 : 2.5);
         if (t % 10 == 0) {
           final alt = 1000 - max(0, t - 5) * 0.5;
           detector.addAlt(time, alt);
@@ -215,17 +217,18 @@ void main() {
       expect(run.endedAtHardDeck, isTrue);
       expect(run.accepted, isTrue);
       expect(run.descentRate, closeTo(5, 0.1));
-      // Backdated to the first high-g sample
+      // Backdated to the first sample over 2 g
       expect(run.start, 10500);
       expect(run.entry, AcroEntry.gLoad);
     });
 
     test("ends once the pilot stops maneuvering", () {
       final detector = AcroRunDetector();
+      // Down at 5 m/s while maneuvering, then level
       for (int t = 0; t <= 600; t++) {
         final time = t * 100;
-        detector.addG(time, t < 300 ? 2.0 : 1.0);
-        if (t % 10 == 0) detector.addAlt(time, 1000 - t * 0.5);
+        detector.addG(time, t < 300 ? 2.5 : 1.0);
+        if (t % 10 == 0) detector.addAlt(time, 1000 - min(t, 300) * 0.5);
       }
       expect(detector.running, isTrue);
       final run = detector.update(300 * 100 + AcroRunDetector.quietMs, height: 500, hardDeck: 300)!;
@@ -234,26 +237,54 @@ void main() {
       expect(run.descentRate, closeTo(5, 0.1));
     });
 
-    test("a short burst of g isn't a run", () {
+    test("a bump over 2 g isn't a run", () {
       final detector = AcroRunDetector();
-      for (int t = 0; t < 8; t++) {
-        detector.addG(t * 100, 2.0);
+      for (int t = 0; t < 3; t++) {
+        detector.addG(t * 100, 3.0);
       }
-      detector.addG(800, 1.0);
+      detector.addG(300, 1.0);
       expect(detector.running, isFalse);
     });
 
-    test("stall entry starts a run where the drop began", () {
+    test("exactly 2 g isn't over 2 g", () {
       final detector = AcroRunDetector();
       for (int t = 0; t < 20; t++) {
-        detector.addG(t * 100, 1.0);
+        detector.addG(t * 100, 2.0);
       }
-      for (int t = 20; t < 26; t++) {
-        detector.addG(t * 100, 0.3);
+      expect(detector.running, isFalse);
+    });
+
+    /// 2 s level, 0.6 s under [stallG] from 2000 ms, then 1 g, sinking [sink] m/s from the stall on. Altitude every 1 s.
+    AcroRunDetector stall({required double sink, double stallG = 0.4, int seconds = 30}) {
+      final detector = AcroRunDetector();
+      for (int t = 0; t <= seconds * 10; t++) {
+        final time = t * 100;
+        detector.addG(time, t >= 20 && t < 26 ? stallG : 1.0);
+        if (t % 10 == 0) {
+          detector.addAlt(time, 1000 - max(0, t - 20) / 10 * sink);
+          detector.update(time, height: 1000, hardDeck: 300);
+        }
       }
+      return detector;
+    }
+
+    test("stall entry starts a run where the drop began, once the sink confirms it", () {
+      // 1000 ft/min down after a stall into a heli
+      final detector = stall(sink: 5);
       expect(detector.running, isTrue);
       expect(detector.runEntry, AcroEntry.stall);
       expect(detector.runStart, 2000);
+    });
+
+    test("a stall waits for the sink before starting a run", () {
+      final detector = stall(sink: 5, seconds: 10);
+      expect(detector.running, isFalse);
+    });
+
+    test("a throttle chop or thermal sag without sink isn't a run", () {
+      // 0.65 g sag, then 300 ft/min down
+      final detector = stall(sink: 1.5, stallG: 0.65);
+      expect(detector.running, isFalse);
     });
 
     test("a brief low-g bump isn't a stall", () {
@@ -261,7 +292,37 @@ void main() {
       detector.addG(0, 0.3);
       detector.addG(100, 0.3);
       detector.addG(200, 1.0);
+      detector.addAlt(0, 1000);
+      detector.addAlt(20000, 900);
+      detector.update(20000, height: 900, hardDeck: 300);
       expect(detector.running, isFalse);
+    });
+
+    test("over 2 g right after a stall starts at the stall", () {
+      final detector = AcroRunDetector();
+      for (int t = 0; t < 26; t++) {
+        detector.addG(t * 100, t >= 20 ? 0.4 : 1.0);
+      }
+      for (int t = 26; t < 40; t++) {
+        detector.addG(t * 100, 2.5);
+      }
+      expect(detector.running, isTrue);
+      expect(detector.runEntry, AcroEntry.stall);
+      expect(detector.runStart, 2000);
+    });
+
+    test("a steady fast descent keeps the run going", () {
+      final detector = AcroRunDetector();
+      // 3 s over 2 g, then 1 g while still coming down at 800 ft/min for a minute
+      for (int t = 0; t <= 600; t++) {
+        final time = t * 100;
+        detector.addG(time, t < 30 ? 2.5 : 1.0);
+        if (t % 10 == 0) {
+          detector.addAlt(time, 1000 - t / 10 * 4);
+          expect(detector.update(time, height: 1000 - t / 10 * 4, hardDeck: 300), isNull);
+        }
+      }
+      expect(detector.running, isTrue);
     });
 
     test("sharp turn starts a run where the rotation began", () {
@@ -309,6 +370,47 @@ void main() {
       final run = fly(detector, hardDeck: 960)!;
       expect(run.endedAtHardDeck, isTrue);
       expect(run.accepted, isFalse);
+    });
+
+    /// Clips of the owner's logged flights: g (as logged) and height above the ground, no positions.
+    group("logged flights", () {
+      final clips = jsonDecode(File("test/fixtures/acro_entries.json").readAsStringSync()) as List;
+
+      /// Replays a clip with g on a 100 ms grid, like the live record. Returns the detector.
+      AcroRunDetector replay(Map clip) {
+        final g = (clip["g"] as List).map((p) => (p[0] as int, (p[1] as num).toDouble())).toList();
+        final alt = (clip["alt"] as List).map((p) => (p[0] as int, (p[1] as num).toDouble())).toList();
+        final detector = AcroRunDetector();
+        int gi = 0, ai = 0;
+        for (int time = g.first.$1; time <= g.last.$1; time += 100) {
+          while (gi + 1 < g.length && g[gi + 1].$1 <= time) {
+            gi++;
+          }
+          final (t0, v0) = g[gi];
+          final (t1, v1) = g[min(gi + 1, g.length - 1)];
+          detector.addG(time, t1 > t0 ? v0 + (v1 - v0) * (time - t0) / (t1 - t0) : v0);
+          while (ai < alt.length && alt[ai].$1 <= time) {
+            detector.addAlt(alt[ai].$1, alt[ai].$2);
+            detector.update(alt[ai].$1, height: alt[ai].$2, hardDeck: 304.8);
+            ai++;
+          }
+        }
+        return detector;
+      }
+
+      test("a stall into a heli starts a run, the throttle chop at the climb top doesn't", () {
+        final detector = replay(clips.firstWhere((c) => c["expect"] == "stall"));
+        expect(detector.running, isTrue);
+        expect(detector.runEntry, AcroEntry.stall);
+        // The heli entry was 46 s into the clip; the climb top 18 s in
+        expect(detector.runStart, inInclusiveRange(44000, 48000));
+      });
+
+      test("a thermal sag and a single bump don't start runs", () {
+        for (final clip in clips.where((c) => c["expect"] == null)) {
+          expect(replay(clip).running, isFalse, reason: clip["name"]);
+        }
+      });
     });
 
     test("learned rate follows recent runs", () {
@@ -554,6 +656,32 @@ void main() {
       expect(service.table.bands.length, 1);
       expect(service.table.bands.values.single.east, closeTo(4, 0.2));
       expect(service.prediction, isNotNull);
+    });
+
+    test("heights come from the ground below before launch", () {
+      final service = AcroService(groundAt: (latlng) => null);
+      // App restarted mid-flight: "launch" is 400 m up
+      final geo = Geo(lat: origin.latitude, lng: origin.longitude, alt: 900, timestamp: 1000)..ground = 100;
+      service.update(geo,
+          gForce: <TimestampValue<double>>[],
+          launchAlt: 500,
+          waypoints: const [],
+          hardDeck: 300,
+          acroRate: 5,
+          reserveRates: [3]);
+      expect(service.groundRefSource, AcroGroundRef.here);
+      expect(service.height, 800);
+
+      // No ground data: launch is all there is
+      service.update(Geo(lat: origin.latitude, lng: origin.longitude, alt: 900, timestamp: 2000),
+          gForce: <TimestampValue<double>>[],
+          launchAlt: 500,
+          waypoints: const [],
+          hardDeck: 300,
+          acroRate: 5,
+          reserveRates: [3]);
+      expect(service.groundRefSource, AcroGroundRef.launch);
+      expect(service.height, 400);
     });
 
     test("acro is left out of the wind table", () {

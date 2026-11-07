@@ -43,7 +43,7 @@ enum AcroEntry {
   /// A hard turn or spin-up: the phone rotated fast.
   sharpTurn,
 
-  /// Sustained g with no stall or fast rotation seen (e.g. no gyroscope).
+  /// Over 2 g with no stall or fast rotation seen first.
   gLoad,
 }
 
@@ -81,25 +81,37 @@ class AcroRun {
 
 /// Finds acro runs from the entry into a maneuver, and measures how fast they came down.
 ///
-/// A run starts on a stall (g under [stallG] for [stallHoldMs]) or a sharp turn (rotation at [turnRate] or more for
-/// [turnHoldMs]), backdated to where the entry began. Sustained g ([startG] for [gHoldMs]) also starts one, for phones
-/// without a gyroscope. Runs only start while [armed] (above the hard deck), so landing flares don't count.
+/// A run starts on a stall (g under [stallG] for [stallHoldMs], confirmed by [stallSink] over the next
+/// [stallConfirmMs]), a sharp turn (rotation at [turnRate] or more for [turnHoldMs]), or g over [startG] for [gHoldMs],
+/// backdated to where the entry began. Runs only start while [armed] (above the hard deck), so landing flares don't
+/// count.
 ///
-/// A run ends at the hard deck, or once nothing acro-like ([quietG], [quietLowG], [quietRate]) is seen for [quietMs].
+/// A run ends at the hard deck, or once nothing acro-like ([quietG], [quietLowG], [quietRate], [activeSink]) is seen
+/// for [quietMs].
+///
+/// Thresholds are tuned on the owner's flight logs: a stall into a heli dips to about 0.4-0.6 g, while throttle chops
+/// and thermals sag to 0.6-0.7 g with no sink after.
 class AcroRunDetector {
-  static const double stallG = 0.5;
-  static const int stallHoldMs = 300;
+  static const double stallG = 0.7;
+  static const int stallHoldMs = 250;
+
+  /// Sink (m/s) averaged from 3 s to [stallConfirmMs] after a stall, needed to count it. 700 ft/min.
+  static const double stallSink = 3.556;
+  static const int stallConfirmMs = 15000;
 
   /// Degrees per second, total rotation in any direction (works with the phone in a pocket)
   static const double turnRate = 60;
   static const int turnHoldMs = 1000;
 
-  static const double startG = 1.5;
-  static const int gHoldMs = 1000;
+  static const double startG = 2.0;
+  static const int gHoldMs = 250;
 
   static const double quietG = 1.3;
   static const double quietLowG = 0.7;
   static const double quietRate = 30;
+
+  /// Sinking this fast (m/s, over the last 6 s) keeps a run going through the steady parts. 500 ft/min.
+  static const double activeSink = 2.54;
   static const int quietMs = 20000;
 
   /// Shortest run worth learning from
@@ -124,6 +136,9 @@ class AcroRunDetector {
   int? _turnSince;
   int? _lastActive;
 
+  /// A stall waiting for the sink to confirm it: (where the drop began, when it triggered)
+  (int, int)? _pendingStall;
+
   /// Start of the run in progress (ms)
   int? runStart;
   AcroEntry? runEntry;
@@ -136,6 +151,7 @@ class AcroRunDetector {
     _highSince = null;
     _turnSince = null;
     _lastActive = null;
+    _pendingStall = null;
     runStart = null;
     runEntry = null;
   }
@@ -164,19 +180,24 @@ class AcroRunDetector {
 
   void _start(int since, AcroEntry entry) {
     if (running || !armed) return;
-    runStart = since;
-    runEntry = entry;
+    // A stall just before is where this maneuver began
+    final stall = _pendingStall;
+    _pendingStall = null;
+    runStart = stall?.$1 ?? since;
+    runEntry = stall == null ? entry : AcroEntry.stall;
   }
 
   /// G-load magnitude (1 = level flight)
   void addG(int time, double g) {
     if (g < stallG) {
       _lowSince ??= time;
-      if (time - _lowSince! >= stallHoldMs) _start(_lowSince!, AcroEntry.stall);
+      if (time - _lowSince! >= stallHoldMs && !running && armed && _pendingStall == null) {
+        _pendingStall = (_lowSince!, time);
+      }
     } else {
       _lowSince = null;
     }
-    if (g >= startG) {
+    if (g > startG) {
       _highSince ??= time;
       if (time - _highSince! >= gHoldMs) _start(_highSince!, AcroEntry.gLoad);
     } else {
@@ -198,6 +219,21 @@ class AcroRunDetector {
 
   /// Check whether the run in progress has ended. [height] and [hardDeck] are meters above the ground.
   AcroRun? update(int now, {required double? height, required double hardDeck}) {
+    // A stall only counts if the glider then comes down fast: throttle chops and thermals don't
+    final stall = _pendingStall;
+    if (stall != null && now - stall.$2 >= stallConfirmMs) {
+      _pendingStall = null;
+      final a = altAt(stall.$2 + 3000), b = altAt(stall.$2 + stallConfirmMs);
+      if (!running && a != null && b != null && (a - b) / (stallConfirmMs - 3000) * 1000 >= stallSink) {
+        runStart = stall.$1;
+        runEntry = AcroEntry.stall;
+      }
+    }
+    if (_alts.isNotEmpty && _alts.first.$1 <= now - 6000) {
+      final before = altAt(now - 6000), here = altAt(now);
+      if (before != null && here != null && (before - here) / 6 >= activeSink) _lastActive = now;
+    }
+
     final start = runStart;
     final entry = runEntry;
     if (start == null || entry == null) return null;

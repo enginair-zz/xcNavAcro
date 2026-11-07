@@ -212,15 +212,16 @@ class AcroService with ChangeNotifier {
     // --- Height reference
     acroWaypoint = findAcroWaypoint(waypoints);
     final wpGround = acroWaypoint == null ? null : groundAt(acroWaypoint!.latlng.first);
+    // Ground elevation before launch: after an app restart mid-flight, "launch" is wherever the app came back
     if (wpGround != null) {
       groundRef = wpGround;
       groundRefSource = AcroGroundRef.waypoint;
-    } else if (launchAlt != null) {
-      groundRef = launchAlt;
-      groundRefSource = AcroGroundRef.launch;
-    } else {
+    } else if (geo.ground != null) {
       groundRef = geo.ground;
-      groundRefSource = geo.ground == null ? null : AcroGroundRef.here;
+      groundRefSource = AcroGroundRef.here;
+    } else {
+      groundRef = launchAlt;
+      groundRefSource = launchAlt == null ? null : AcroGroundRef.launch;
     }
     height = groundRef == null ? null : geo.alt - groundRef!;
 
