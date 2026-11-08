@@ -21,6 +21,9 @@ double ambientFromAlt(double altitudeMeters, double pressure) {
   return pressure / pow(term, 1 / exponent);
 }
 
+/// Wrap an angle (radians) into -pi..pi
+double wrapPi(double rad) => (rad + pi) % (2 * pi) - pi;
+
 double calcAltGained(List<Geo> samples) {
   double gained = 0;
   final values = douglasPeucker(samples.map((e) => e.alt).toList(), 3);
@@ -40,6 +43,13 @@ class Geo {
 
   /// Ground Elevation
   double? ground;
+
+  /// Barometer reading behind [alt] (hPa), if a barometer was used. Logged to check the altitude afterwards.
+  double? pressure;
+
+  /// Barometer / GPS came from an external (BLE) sensor rather than the phone. Logged.
+  bool? baroExternal;
+  bool? gpsExternal;
 
   /// milliseconds since epoch
   int time = 0;
@@ -71,12 +81,12 @@ class Geo {
       if (dist < 1) {
         hdg = prev.hdg;
       } else {
-        hdg = latlngCalc.bearing(LatLng(prev.lat, prev.lng), LatLng(lat, lng)) * 3.1415926 / 180;
+        hdg = wrapPi(latlngCalc.bearing(LatLng(prev.lat, prev.lng), LatLng(lat, lng)) * 3.1415926 / 180);
       }
     } else {
       spd = prev?.spd ?? location.speed;
-      // location.heading is in degrees, hdg is in radians
-      hdg = prev?.hdg ?? location.heading * pi / 180;
+      // location.heading is in degrees (0..360), hdg is in radians (-pi..pi)
+      hdg = prev?.hdg ?? wrapPi(location.heading * pi / 180);
     }
 
     if (forceGpsAltitude || baro == null) {
@@ -156,7 +166,12 @@ class Geo {
       "time": time,
       "hdg": roundToDigits(hdg, 2),
       "spd": roundToDigits(spd, 3),
-      if (ground != null) "ground": roundToDigits(ground!, 2)
+      if (ground != null) "ground": roundToDigits(ground!, 2),
+      "altGps": roundToDigits(altGps, 2),
+      // 3-dig hPa ~= 1cm
+      if (pressure != null) "baro": roundToDigits(pressure!, 3),
+      if (baroExternal != null) "baroExt": baroExternal! ? 1 : 0,
+      if (gpsExternal != null) "gpsExt": gpsExternal! ? 1 : 0,
     };
     return dict;
   }
@@ -169,5 +184,9 @@ class Geo {
     hdg = parseAsDouble(data["hdg"]) ?? 0;
     spd = parseAsDouble(data["spd"]) ?? 0;
     ground = parseAsDouble(data["ground"]);
+    altGps = parseAsDouble(data["altGps"]) ?? alt;
+    pressure = parseAsDouble(data["baro"]);
+    if (data["baroExt"] != null) baroExternal = data["baroExt"] == 1;
+    if (data["gpsExt"] != null) gpsExternal = data["gpsExt"] == 1;
   }
 }

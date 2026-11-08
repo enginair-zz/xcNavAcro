@@ -104,7 +104,7 @@ class _ViewWindTableState extends State<ViewWindTable> {
           const Text("MSL", style: header),
           const Text("From", style: header),
           const Text("Wind", style: header),
-          const Text("Air", style: header),
+          const Text("Airspd", style: header),
           const Text("Fits", style: header),
           const Text("Age", style: header),
         ]),

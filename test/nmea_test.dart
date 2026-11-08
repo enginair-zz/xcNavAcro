@@ -159,6 +159,24 @@ void main() {
       expect(positions.first.longitude, closeTo(11.516667, 0.0001));
     });
 
+    test("re-stamps UltraBip fixes for their lag", () {
+      final device = BleDeviceStodeus();
+      final positions = <Position>[];
+      device.onPosition = positions.add;
+      device.handleBytes(ascii.encode("$gga\r\n$rmc\r\n"));
+
+      final direct = <Position>[];
+      final assembler = NmeaFixAssembler();
+      for (final line in [gga, rmc]) {
+        final body = nmeaBody(line)!;
+        final g = NmeaGga.parse(body);
+        final p = g != null ? assembler.addGga(g) : assembler.addRmc(NmeaRmc.parse(body)!);
+        if (p != null) direct.add(p);
+      }
+      expect(positions.single.timestamp, direct.single.timestamp.subtract(BleDeviceStodeus.positionLag));
+      expect(positions.single.latitude, direct.single.latitude);
+    });
+
     testWidgets("status follows connection and data", (tester) async {
       final device = BleDeviceStodeus();
       expect(device.attached.value, false);

@@ -25,6 +25,7 @@ import 'package:xcnav/models/fuel_report.dart';
 import 'package:xcnav/datadog.dart' as dd;
 
 // --- Models
+import 'package:xcnav/models/baro_anchor.dart';
 import 'package:xcnav/models/geo.dart';
 import 'package:xcnav/models/geoid.dart';
 import 'package:xcnav/models/gps_jump_filter.dart';
@@ -144,15 +145,36 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
   StreamSubscription<BarometerEvent>? listenBaro;
   StreamSubscription<AccelerometerEvent>? listenIMU;
 
-  /// Phone sensors are ignored while an external (BLE) sensor has reported within this window.
+  /// Rate limit for the "ignoring external sensor" debug log.
   static const externalSensorTimeout = Duration(seconds: 5);
+
+  /// Phone sensors are ignored while an external (BLE) sensor has reported within these windows. Short, so a
+  /// Bluetooth dropout in a maneuver falls back to the phone quickly. External baro reports at 10hz, GPS at 1hz.
+  static const externalBaroTimeout = Duration(seconds: 1);
+  static const externalGpsTimeout = Duration(seconds: 2);
   DateTime? _externalBaroTime;
   DateTime? _externalGpsTime;
 
   bool get externalBaroActive =>
-      _externalBaroTime != null && clock.now().difference(_externalBaroTime!) < externalSensorTimeout;
+      _externalBaroTime != null && clock.now().difference(_externalBaroTime!) < externalBaroTimeout;
   bool get externalGpsActive =>
-      _externalGpsTime != null && clock.now().difference(_externalGpsTime!) < externalSensorTimeout;
+      _externalGpsTime != null && clock.now().difference(_externalGpsTime!) < externalGpsTimeout;
+
+  /// Keeps the barometer's reference pressure tied to GPS altitude (not while maneuvering).
+  final BaroAnchor baroAnchor = BaroAnchor();
+
+  /// Altitude difference between the phone and external barometers, for smooth switches.
+  final BaroSourceOffset baroSourceOffset = BaroSourceOffset();
+
+  /// Source of the latest barometer reading / GPS fix (null before the first)
+  bool? _baroExternal;
+  bool? _gpsExternal;
+
+  /// At this g or more the barometer reference stops following GPS, and stays paused until g has been below it for
+  /// [anchorResumeAfter]. Simulated on the 2026-11-07 flights (phone GPS altitude lagging ~7 s in dives), this took the
+  /// reading at the hard deck in a spiral from 560 ft too high to under 200 ft, without losing accuracy in level flight.
+  static const double anchorPauseG = 1.5;
+  static const anchorResumeAfter = Duration(seconds: 10);
 
   final GeolocatorPlatform _geolocatorPlatform = GeolocatorPlatform.instance;
   Stream<Position>? positionStream;
@@ -335,6 +357,7 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
 
     debugPrint("Starting Barometer Service Stream");
     listenBaro = barometerEventStream(samplingPeriod: SensorInterval.normalInterval).listen((event) {
+      baroSourceOffset.addPhone(event.timestamp.millisecondsSinceEpoch, event.pressure, baroAmbient?.pressure);
       if (externalBaroActive) return;
       _handleBaro(BarometerEvent(event.pressure, event.timestamp));
     }, onError: (error) {
@@ -347,9 +370,11 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
 
   /// Handle barometer changes (run the vario).
   /// [vario] (m/s) is used as-is, without our smoothing, when the sensor provides its own (already smoothed).
-  void _handleBaro(BarometerEvent event, {double? vario}) {
+  void _handleBaro(BarometerEvent event, {double? vario, bool external = false}) {
     final baroPrev = baro;
     baro = event;
+    if (_baroExternal != null && _baroExternal != external) _switchBaro(external, event.pressure, baroPrev?.pressure);
+    _baroExternal = external;
     if (vario != null) {
       varioSmooth.value = vario.isFinite ? vario : 0;
       return;
@@ -375,7 +400,32 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     }
     if (!externalBaroActive) debugPrint("Using external barometer ($pressure hPa)");
     _externalBaroTime = clock.now();
-    _handleBaro(BarometerEvent(pressure, clock.now()), vario: vario);
+    baroSourceOffset.addExternal(clock.now().millisecondsSinceEpoch, pressure, baroAmbient?.pressure);
+    _handleBaro(BarometerEvent(pressure, clock.now()), vario: vario, external: true);
+  }
+
+  /// The barometer changed between the phone and an external sensor. Move the reference pressure so the altitude
+  /// carries on from where the old sensor left it, instead of jumping by the difference between the two sensors.
+  void _switchBaro(bool toExternal, double newPressure, double? oldPressure) {
+    final ambient = baroAnchor.ambient;
+    if (ambient == null) return;
+    final alt = baroSourceOffset.continueFrom(toExternal: toExternal, newPressure: newPressure, ambient: ambient) ??
+        (oldPressure == null ? null : altFromBaro(oldPressure, ambient));
+    if (alt == null) return;
+    debugPrint("Barometer switched to ${toExternal ? "external" : "phone"}, continuing from ${alt.round()}m");
+    baroAnchor.setAltitude(alt, newPressure);
+    baroAmbient = BarometerEvent(baroAnchor.ambient!, clock.now());
+  }
+
+  /// Hard maneuvering (g at [anchorPauseG] or more within [anchorResumeAfter]): GPS altitude lags, so the barometer
+  /// reference doesn't follow it.
+  bool get anchorPaused {
+    final cutoff = clock.now().subtract(anchorResumeAfter).millisecondsSinceEpoch;
+    for (final g in gForceRecord.reversed) {
+      if (g.time < cutoff) break;
+      if (g.value >= anchorPauseG) return true;
+    }
+    return false;
   }
 
   DateTime _externalIgnoredLogged = DateTime(0);
@@ -397,7 +447,7 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     }
     if (!externalGpsActive) debugPrint("Using external GPS (${position.latitude}, ${position.longitude})");
     _externalGpsTime = clock.now();
-    handleGeoUpdate(globalContext!, position);
+    handleGeoUpdate(globalContext!, position, external: true);
   }
 
   /// G-force is only recorded in flight, so the IMU only runs in flight to save battery.
@@ -543,7 +593,8 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
   }
 
   /// Do all the things with a GPS update
-  void handleGeoUpdate(BuildContext context, Position position, {bool bypassRecording = false}) {
+  /// [external]: the fix came from an external (BLE) GPS.
+  void handleGeoUpdate(BuildContext context, Position position, {bool bypassRecording = false, bool external = false}) {
     final client = Provider.of<Client>(context, listen: false);
     final group = Provider.of<Group>(context, listen: false);
     final adsb = Provider.of<ADSB>(context, listen: false);
@@ -562,7 +613,8 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     }
 
     if (position.latitude != 0.0 || position.longitude != 0.0) {
-      final accepted = updateGeo(position, bypassRecording: settingsMgr.groundMode.value || bypassRecording);
+      final accepted =
+          updateGeo(position, bypassRecording: settingsMgr.groundMode.value || bypassRecording, external: external);
 
       if (accepted && geo != null) {
         if (!settingsMgr.groundMode.value || settingsMgr.groundModeTelem.value) {
@@ -755,7 +807,8 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
   }
 
   /// Returns false if the fix was rejected as a physically impossible jump.
-  bool updateGeo(Position position, {bool bypassRecording = false}) {
+  /// [external]: the fix came from an external (BLE) GPS.
+  bool updateGeo(Position position, {bool bypassRecording = false, bool external = false}) {
     gpsFix.value = GpsFixQuality(accuracy: position.accuracy, time: clock.now());
     final verdict = gpsJumpFilter.check(geo, position);
     if (verdict == GpsFixVerdict.reject) {
@@ -766,15 +819,25 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
     if (reanchor) {
       debugPrint("Re-anchoring GPS after repeated rejected fixes.");
     }
+    // Two GPS receivers disagree by meters and their clocks by a fraction of a second, so a fix from the other one
+    // can't give speed / heading against the last.
+    final switched = _gpsExternal != null && _gpsExternal != external;
+    _gpsExternal = external;
 
     geoPrev = geo;
     // When re-anchoring, don't derive speed/heading from the jump.
-    geo = Geo.fromPosition(position, reanchor ? null : geoPrev, baro, baroAmbient,
+    geo = Geo.fromPosition(position, (reanchor || switched) ? null : geoPrev, baro, baroAmbient,
         forceGpsAltitude: settingsMgr.forceGpsAltitude.value);
+    geo!.gpsExternal = external;
+    final usedBaro = baro != null && !settingsMgr.forceGpsAltitude.value;
+    if (usedBaro) {
+      geo!.pressure = baro!.pressure;
+      geo!.baroExternal = _baroExternal;
+    }
 
     if (baro == null || settingsMgr.forceGpsAltitude.value) {
       // Use GPS-based vario when barometer unavailable or GPS-only mode enabled
-      if (geoPrev != null && !reanchor) {
+      if (geoPrev != null && !reanchor && !switched) {
         final vario = (geo!.alt - geoPrev!.alt) / (geo!.time - geoPrev!.time) * 1000;
         if (vario.isFinite) {
           varioSmooth.value = varioSmooth.value * 0.8 + vario * 0.2;
@@ -798,18 +861,18 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
 
     recordGeo.add(geo!);
 
-    // Drift barometric ambient toward GPS altitude
-    if (inFlight) {
-      // adjust slowly
-      final target = snapBarometerToGpsAlt(geo!.altGps);
-      final current = baroAmbient?.pressure ?? target.pressure;
-      final mixed = (current) + (target.pressure - current) * 0.1;
-      baroAmbient = BarometerEvent(mixed, target.timestamp);
-    } else {
-      // snap to GPS altitude
-      //debugPrint("Snapping ambient pressure to gps altitude. ${unitConverters[UnitType.distFine]!(geo!.altGps)}");
-      baroAmbient = snapBarometerToGpsAlt(geo!.altGps);
+    // Tie the barometer's reference pressure to GPS altitude: median on the ground, slowly in flight (see BaroAnchor)
+    if (baro != null) {
+      if (inFlight) {
+        baroAnchor.onFlight(geo!.time, geo!.altGps, baro!.pressure, maneuvering: anchorPaused);
+      } else {
+        baroAnchor.onGround(geo!.time, geo!.altGps, baro!.pressure);
+      }
     }
+    final ambient = baroAnchor.ambient;
+    baroAmbient = ambient != null && baro != null
+        ? BarometerEvent(ambient, clock.now())
+        : snapBarometerToGpsAlt(geo!.altGps);
 
     // --- In-Flight detector
     if (globalContext != null && settingsMgr.autoRecordFlight.value) {

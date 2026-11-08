@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xcnav/providers/my_telemetry.dart';
 import 'package:xcnav/settings_service.dart';
+import 'package:xcnav/util.dart';
 
 void main() {
   setUpAll(() async {
@@ -106,5 +107,61 @@ void main() {
     expect(telemetry.externalBaroActive, true);
     telemetry.handleExternalBaro(1013.20, vario: -0.4);
     expect(telemetry.varioSmooth.value, -0.4);
+  });
+
+  test("external baro falls back to the phone after a second", () {
+    final start = DateTime(2026, 11, 7, 10);
+    final telemetry = MyTelemetry();
+    settingsMgr.forceGpsAltitude.value = false;
+    addTearDown(() => settingsMgr.forceGpsAltitude.value = true);
+    withClock(Clock.fixed(start), () => telemetry.handleExternalBaro(1013.25, vario: 0));
+    withClock(Clock.fixed(start.add(const Duration(milliseconds: 900))), () {
+      expect(telemetry.externalBaroActive, true);
+    });
+    withClock(Clock.fixed(start.add(const Duration(milliseconds: 1100))), () {
+      expect(telemetry.externalBaroActive, false);
+    });
+  });
+
+  test("barometer anchor pauses at 1.5 g until 10 s below it", () {
+    final now = DateTime(2026, 11, 7, 10);
+    final telemetry = MyTelemetry();
+    withClock(Clock.fixed(now), () {
+      telemetry.gForceRecord.add(TimestampValue(now.subtract(const Duration(seconds: 20)).millisecondsSinceEpoch, 1.1));
+      expect(telemetry.anchorPaused, false);
+      telemetry.gForceRecord.add(TimestampValue(now.subtract(const Duration(seconds: 9)).millisecondsSinceEpoch, 1.6));
+      telemetry.gForceRecord.add(TimestampValue(now.subtract(const Duration(seconds: 2)).millisecondsSinceEpoch, 1.0));
+      expect(telemetry.anchorPaused, true);
+    });
+    withClock(Clock.fixed(now.add(const Duration(seconds: 2))), () {
+      expect(telemetry.anchorPaused, false);
+    });
+  });
+
+  test("speed and heading aren't derived across a GPS source switch", () {
+    final telemetry = MyTelemetry();
+    final t0 = DateTime(2026, 11, 7, 10);
+    Position fix(double lat, DateTime time, {double speed = 12, double heading = 90}) => Position(
+          longitude: -122,
+          latitude: lat,
+          timestamp: time,
+          accuracy: 3,
+          altitude: 500,
+          altitudeAccuracy: 1,
+          headingAccuracy: 1,
+          heading: heading,
+          speed: speed,
+          speedAccuracy: 0,
+        );
+    telemetry.updateGeo(fix(37, t0));
+    telemetry.updateGeo(fix(37.0001, t0.add(const Duration(seconds: 1))));
+    expect(telemetry.geo!.spd, closeTo(11.1, 0.2));
+    expect(telemetry.geo!.gpsExternal, false);
+
+    // External fix a few meters off the phone's track: reported speed and heading are used, not derived from the step
+    telemetry.updateGeo(fix(37.00025, t0.add(const Duration(seconds: 2)), speed: 12.5, heading: 342), external: true);
+    expect(telemetry.geo!.spd, 12.5);
+    expect(telemetry.geo!.hdg, closeTo(-18 * 3.14159265 / 180, 0.001));
+    expect(telemetry.geo!.gpsExternal, true);
   });
 }
