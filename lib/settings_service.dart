@@ -238,6 +238,7 @@ class SettingsMgr {
   // --- UI
   late final SettingConfig<AltimeterMode> primaryAltimeter;
   late final SettingConfig<double> altimeterVsiThresh;
+  late final SettingConfig<double> varioAverageSeconds;
   late final SettingConfig<bool> mapControlsRightSide;
   late final SettingConfig<bool> showPilotNames;
   late final SettingConfig<bool> hideWeatherObservations;
@@ -373,6 +374,11 @@ class SettingsMgr {
           height: 20,
         ),
         description: "The \"deadzone\" for the up/down arrow next to altimeter.");
+    varioAverageSeconds = SettingConfig(this, prefs, "UI", "varioAverageSeconds", 5.0,
+        title: "vario_average_seconds",
+        icon: const Icon(Icons.av_timer),
+        description: "Elevation view's climb rate is averaged over this long. Longer is steadier but slower to react.",
+        setter: (value) => value.clamp(1.0, 30.0));
     mapControlsRightSide = SettingConfig(this, prefs, "UI", "mapControlsRightSide", false,
         title: "right_hand_ui",
         description: "Move map control buttons to the right side.",

@@ -109,6 +109,28 @@ void main() {
     expect(telemetry.varioSmooth.value, -0.4);
   });
 
+  test("elevation view's vario is averaged, the rest isn't", () {
+    final start = DateTime(2026, 11, 7, 10);
+    final telemetry = MyTelemetry();
+    settingsMgr.forceGpsAltitude.value = false;
+    addTearDown(() => settingsMgr.forceGpsAltitude.value = true);
+    settingsMgr.varioAverageSeconds.value = 5;
+
+    void at(int ms, double vario) => withClock(Clock.fixed(start.add(Duration(milliseconds: ms))),
+        () => telemetry.handleExternalBaro(1013.25, vario: vario));
+
+    at(0, 0);
+    // 10 hz: 4 s of 0 m/s then 1 s of 2 m/s
+    for (int t = 100; t <= 4000; t += 100) {
+      at(t, 0);
+    }
+    for (int t = 4100; t <= 5000; t += 100) {
+      at(t, 2);
+    }
+    expect(telemetry.varioAverage.value, closeTo(0.4, 1e-9));
+    expect(telemetry.varioSmooth.value, 2);
+  });
+
   test("external baro falls back to the phone after a second", () {
     final start = DateTime(2026, 11, 7, 10);
     final telemetry = MyTelemetry();

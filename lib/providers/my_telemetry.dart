@@ -26,6 +26,7 @@ import 'package:xcnav/datadog.dart' as dd;
 
 // --- Models
 import 'package:xcnav/models/baro_anchor.dart';
+import 'package:xcnav/models/vario_average.dart';
 import 'package:xcnav/models/geo.dart';
 import 'package:xcnav/models/geoid.dart';
 import 'package:xcnav/models/gps_jump_filter.dart';
@@ -126,6 +127,15 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
 
   /// Live vario (smoothed)
   ValueNotifier<double> varioSmooth = ValueNotifier(0);
+
+  /// Climb rate averaged over the "Vario Averaging" setting. Display only (elevation view); everything else uses
+  /// [varioSmooth].
+  final VarioAverage varioAverage = VarioAverage();
+
+  void _addVarioAverage(int timeMs, double rate) {
+    varioAverage.window = Duration(milliseconds: (settingsMgr.varioAverageSeconds.value * 1000).round());
+    varioAverage.add(timeMs, rate);
+  }
 
   /// Live speed (smoothed)
   ValueNotifier<double> speedSmooth = ValueNotifier(0);
@@ -373,9 +383,15 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
   void _handleBaro(BarometerEvent event, {double? vario, bool external = false}) {
     final baroPrev = baro;
     baro = event;
-    if (_baroExternal != null && _baroExternal != external) _switchBaro(external, event.pressure, baroPrev?.pressure);
+    final switched = _baroExternal != null && _baroExternal != external;
+    if (switched) {
+      _switchBaro(external, event.pressure, baroPrev?.pressure);
+      // The two barometers read different altitudes: keep that step out of the average
+      varioAverage.skipTo(event.timestamp.millisecondsSinceEpoch);
+    }
     _baroExternal = external;
     if (vario != null) {
+      _addVarioAverage(event.timestamp.millisecondsSinceEpoch, vario);
       varioSmooth.value = vario.isFinite ? vario : 0;
       return;
     }
@@ -384,6 +400,7 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
           (altFromBaro(baro!.pressure, baroAmbient?.pressure) - altFromBaro(baroPrev.pressure, baroAmbient?.pressure)) /
               (baro!.timestamp.difference(baroPrev.timestamp)).inMilliseconds *
               1000;
+      if (!switched) _addVarioAverage(event.timestamp.millisecondsSinceEpoch, rawVario);
       if (rawVario.isFinite) {
         varioSmooth.value = varioSmooth.value * 0.8 + rawVario * 0.2;
       } else {
@@ -839,11 +856,14 @@ class MyTelemetry with ChangeNotifier, WidgetsBindingObserver {
       // Use GPS-based vario when barometer unavailable or GPS-only mode enabled
       if (geoPrev != null && !reanchor && !switched) {
         final vario = (geo!.alt - geoPrev!.alt) / (geo!.time - geoPrev!.time) * 1000;
+        _addVarioAverage(geo!.time, vario);
         if (vario.isFinite) {
           varioSmooth.value = varioSmooth.value * 0.8 + vario * 0.2;
         } else {
           varioSmooth.value = 0;
         }
+      } else {
+        varioAverage.skipTo(geo!.time);
       }
     }
 

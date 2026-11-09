@@ -125,6 +125,7 @@
       "glide_range_inner_color": "Внутренний цвет",
       "primary_altimeter": "Основной альтиметр",
       "altimeter_vsi_thresh": "Порог стрелки альтиметра (м/с)",
+      "vario_average_seconds": "Усреднение вариометра (с)",
       "right_hand_ui": "Интерфейс для правшей",
       "always_show_pilot_names": "Показывать имена пилотов",
       "hide_wind_observations": "Скрыть наблюдения за ветром",

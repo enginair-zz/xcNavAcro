@@ -125,6 +125,7 @@
             "glide_range_inner_color": "สีด้านใน",
             "primary_altimeter": "เครื่องวัดความสูงหลัก",
             "altimeter_vsi_thresh": "เกณฑ์ลูกศรเครื่องวัดความสูง (m/s)",
+            "vario_average_seconds": "ช่วงเวลาเฉลี่ยวาริโอ (s)",
             "right_hand_ui": "หน้าจอสำหรับคนถนัดขวา",
             "always_show_pilot_names": "แสดงชื่อนักบินเสมอ",
             "hide_wind_observations": "ซ่อนข้อมูลลมที่สังเกตได้",

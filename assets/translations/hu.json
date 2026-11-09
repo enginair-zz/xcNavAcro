@@ -125,6 +125,7 @@
             "glide_range_inner_color": "Belső szín",
             "primary_altimeter": "Elsődleges magasságmérő",
             "altimeter_vsi_thresh": "Magasságmérő nyíl küszöbértéke (m/s)",
+            "vario_average_seconds": "Variométer átlagolás (s)",
             "right_hand_ui": "Jobbkezes felhasználói felület",
             "always_show_pilot_names": "Pilótanevek mindig látszanak",
             "hide_wind_observations": "Szélmegfigyelések elrejtése",

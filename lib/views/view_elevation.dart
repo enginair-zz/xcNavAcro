@@ -88,7 +88,7 @@ class ViewElevationState extends State<ViewElevation> {
         children: [
           // --- Vario
           Text.rich(
-              richValue(UnitType.vario, myTelemetry.varioSmooth.value, valueStyle: valueStyle, unitStyle: unitStyle)),
+              richValue(UnitType.vario, myTelemetry.varioAverage.value, valueStyle: valueStyle, unitStyle: unitStyle)),
 
           // --- Glide Slope
           Text.rich(TextSpan(children: [
